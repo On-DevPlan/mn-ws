@@ -1,0 +1,83 @@
+# Release —— 打附注 tag 即发版到 npm。
+#
+# 流程：push 一个 vX.Y.Z 附注 tag → 校验 tag 与 package.json 版本一致 →
+#        npm publish → 建 GitHub Release（自动生成附注）。
+#
+# 为什么 tag 必须与 package.json 版本一致：
+#   npm 上同一个版本号**永远只能发一次**（重发报 E403 "cannot publish over"）。
+#   如果 tag 写 v0.1.0 而 package.json 是 0.0.9，那这次发出去的版本号
+#   和 tag 对不上，以后想补发就得跳号。宁可在流水线里当场失败。
+#
+# Secrets:
+#   NPM_TOKEN —— npm 发布令牌（nx-sk 的 secret 栏目里有）
+#
+# 手动发版：Actions 里选本 workflow → Run workflow（用 package.json 里已有的版本号）
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: 发布到 npm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # 附注 tag 与版本号必须一致 —— 见文件头说明
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          set -euo pipefail
+          VER=$(node -p "require('./package.json').version")
+          echo "package.json version: $VER"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            echo "tag: $TAG"
+            if [ "$TAG" != "v$VER" ]; then
+              echo "::error::tag ($TAG) 与 package.json 版本 (v$VER) 不一致 —— 不发布，避免 npm 上出现跳号版本"
+              exit 1
+            fi
+          else
+            echo "手动触发：使用 package.json 里的版本号 v$VER"
+          fi
+
+      - name: 装依赖并跑测试（发版前不留未验证的版本）
+        run: |
+          set -euo pipefail
+          npm ci
+          node test/unit.js
+          node test/smoke-cli.js
+
+      - name: 发布到 npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 建 GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "$TAG" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "$TAG" \
+            --generate-notes \
+            || gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --generate-notes
+          echo "release $TAG 已发布"

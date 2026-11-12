@@ -1,0 +1,8 @@
+node_modules/
+.tmp-smoke/
+*.log
+npm-debug.log*
+.env
+.env.*
+.DS_Store
+Thumbs.db

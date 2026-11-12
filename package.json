@@ -1,0 +1,45 @@
+{
+  "name": "mn-ws",
+  "version": "0.1.0",
+  "description": "mn-ws —— HTTP ⇄ WebSocket 双向桥：把本机 nx 系列服务经一条 WebSocket 暴露给 HTTP 客户端",
+  "bin": {
+    "mn-ws": "./bin/index.js"
+  },
+  "main": "lib/index.js",
+  "type": "commonjs",
+  "files": [
+    "bin/",
+    "lib/",
+    "server/",
+    "client/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node bin/index.js client",
+    "server": "node bin/index.js server",
+    "test": "node test/unit.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "websocket",
+    "bridge",
+    "http",
+    "proxy",
+    "nx"
+  ],
+  "license": "MIT"
+}

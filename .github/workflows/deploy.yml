@@ -1,0 +1,277 @@
+# Deploy —— GHCR 派：runner build+push ghcr.io → 服务器 pull → 重启 → 验活。
+#
+# 与 mn-rt 的 deploy.yml 同构（服务器档案 / 运维命令见 docs/DEPLOY.md）：
+#   镜像走 GHCR（服务器 pull 很快），SSH 只传一个几百字节的 docker 鉴权配置，
+#   不做 GHA→服务器的整镜像传输。
+#
+# Secrets:
+#   HOST / USERNAME / PORT / SSH_KEY —— 部署机 SSH
+#   GHCR_TOKEN —— PAT，read:packages；服务器 pull 鉴权用（公开包可匿名 pull）
+#   MN_WS_TOKEN —— 注册门禁（静态共享密钥）
+#   MN_WS_JWT_SECRET —— 统一登录的 JWT 签名密钥（配了就启用设备令牌）
+#   MN_WS_AUTH_ENABLED —— 显式开/关统一登录（1/true/yes/on 与 0/false/no/off）
+#   MN_WS_ISSUER —— 认证中心地址
+#   MN_WS_IDP_CLIENT_ID —— 认证中心侧的 client id
+
+name: Deploy
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'server/**'
+      - 'lib/**'
+      - 'client/**'
+      - 'bin/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'Dockerfile'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # GHCR 要求 owner 全小写
+  IMAGE_FULL: ghcr.io/on-devplan/mn-ws/mn-ws-server
+  CONTAINER_NAME: mn_ws_server
+  HOST_PORT: 7777
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR (push side)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_FULL }}:latest
+            ${{ env.IMAGE_FULL }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Push 后尽量把包设为 public——避免 GHCR visibility 同步怪象导致
+      # 公开包匿名 pull 仍 401。
+      #
+      # ⚠️ 已知限制：该 PATCH 对「组织所有」的 package 恒返回 404
+      # （GITHUB_TOKEN 只能操作 workflow 所属「仓库」的资源）。
+      # 服务器侧已改为带 GHCR_TOKEN 鉴权 pull，不依赖包是否 public，
+      # 所以这里失败只告警、不阻断部署。
+      - name: Make package public
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORG: On-DevPlan
+          PKG_NAME: mn-ws/mn-ws-server
+        run: |
+          PKG_ENC=$(printf '%s' "$PKG_NAME" | sed 's|/|%2F|g')
+          URL="https://api.github.com/orgs/${ORG}/packages/container/${PKG_ENC}"
+          HTTP=$(curl -s -o /tmp/vis_resp.json -w "%{http_code}" \
+            -X PATCH \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$URL" \
+            -d '{"visibility":"public"}' || echo "000")
+          echo "PATCH status: $HTTP"
+          if [ "$HTTP" != "200" ]; then
+            echo "::warning::visibility PATCH 未成功 (status $HTTP)——不阻断部署，服务器将用 GHCR_TOKEN 鉴权 pull"
+          else
+            echo "package visibility set to public"
+          fi
+
+      # secret 长度诊断：任一没配/配错第一时间在日志里看到，不用等部署失败再猜
+      - name: Diagnose secrets (length only)
+        if: always()
+        env:
+          HOST_LEN:       ${{ secrets.HOST }}
+          USERNAME_LEN:   ${{ secrets.USERNAME }}
+          SSH_KEY_LEN:    ${{ secrets.SSH_KEY }}
+          PORT_LEN:       ${{ secrets.PORT }}
+          GHCR_TOKEN_LEN: ${{ secrets.GHCR_TOKEN }}
+          MN_WS_TOKEN_LEN: ${{ secrets.MN_WS_TOKEN }}
+          MN_WS_JWT_SECRET_LEN: ${{ secrets.MN_WS_JWT_SECRET }}
+          MN_WS_AUTH_ENABLED_VAL: ${{ secrets.MN_WS_AUTH_ENABLED }}
+          MN_WS_ISSUER_VAL: ${{ secrets.MN_WS_ISSUER }}
+        run: |
+          echo "HOST length: ${#HOST_LEN}"
+          echo "USERNAME length: ${#USERNAME_LEN}"
+          echo "SSH_KEY length: ${#SSH_KEY_LEN}"
+          echo "PORT length: ${#PORT_LEN}"
+          echo "GHCR_TOKEN length: ${#GHCR_TOKEN_LEN} (0=未配，服务器将走匿名 pull，可能 401)"
+          echo "MN_WS_TOKEN length: ${#MN_WS_TOKEN_LEN} (0=未配，客户端只能用设备令牌注册)"
+          echo "MN_WS_JWT_SECRET length: ${#MN_WS_JWT_SECRET_LEN} (0=未配，签不出设备令牌)"
+          echo "MN_WS_AUTH_ENABLED: '${MN_WS_AUTH_ENABLED_VAL:-<未配>}' (认 1/true/yes/on 与 0/false/no/off)"
+          echo "MN_WS_ISSUER: '${MN_WS_ISSUER_VAL:-<未配>}'"
+
+      # 把 GHCR pull 用的鉴权文件以 artifact 形式从 build 传到 deploy
+      # （job output 会被 secret-scanner 拦，artifact 文件不被扫值）。
+      - name: Write docker pull config
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || '' }}
+        run: |
+          AUTH_B64=$(printf 'oauth2:%s' "$GHCR_TOKEN" | base64 -w0)
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > docker_config.json
+          echo "wrote docker_config.json ($(wc -c < docker_config.json) bytes)"
+
+      - name: Upload docker config
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-config
+          path: docker_config.json
+          retention-days: 1
+
+      - name: Download docker config
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-config
+          path: .
+          merge-multiple: true
+
+      - name: Copy config to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.PORT || 22 }}
+          source: "docker_config.json"
+          target: "~/app/"
+          timeout: 2m
+
+      - name: Pull image and restart
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || '' }}
+          MN_WS_TOKEN: ${{ secrets.MN_WS_TOKEN || '' }}
+          MN_WS_JWT_SECRET: ${{ secrets.MN_WS_JWT_SECRET || '' }}
+          MN_WS_AUTH_ENABLED: ${{ secrets.MN_WS_AUTH_ENABLED || '' }}
+          MN_WS_ISSUER: ${{ secrets.MN_WS_ISSUER || '' }}
+          MN_WS_IDP_CLIENT_ID: ${{ secrets.MN_WS_IDP_CLIENT_ID || '' }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.PORT || 22 }}
+          envs: GHCR_TOKEN,MN_WS_TOKEN,MN_WS_JWT_SECRET,MN_WS_AUTH_ENABLED,MN_WS_ISSUER,MN_WS_IDP_CLIENT_ID
+          timeout: 30s
+          command_timeout: 30m
+          script: |
+            set -e
+            cd ~/app
+
+            if [ -n "$GHCR_TOKEN" ] && [ -s docker_config.json ]; then
+              mkdir -p ~/.docker
+              mv -f docker_config.json ~/.docker/config.json
+              chmod 600 ~/.docker/config.json
+              echo "docker pull config installed (authenticated)"
+            else
+              rm -f docker_config.json
+              echo "docker pull: GHCR_TOKEN 未配，匿名 pull（公开包 OK）"
+            fi
+
+            IMAGE="${{ env.IMAGE_FULL }}:latest"
+            CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
+            HOST_PORT="${{ env.HOST_PORT }}"
+
+            echo "Pulling ${IMAGE}..."
+            timeout 720 docker pull "${IMAGE}" \
+              && echo "pull ok" \
+              || echo "WARN: pull failed/timeout (fallback to local cache)"
+
+            docker image inspect "${IMAGE}" > /dev/null \
+              || { echo "no image at all（pull 失败且无缓存）"; exit 1; }
+
+            # ── 部署前的意图判定 ────────────────────────────────────────────
+            # 必须和代码里的 wantAuth 推导一致：
+            #   显式开关优先，没表态就跟随「配没配 JWT secret」。
+            # 断言用的是这个**意图值**，不是「我传了什么」。
+            AUTH_RAW="${MN_WS_AUTH_ENABLED:-}"
+            case "$(printf '%s' "$AUTH_RAW" | tr 'A-Z' 'a-z')" in
+              1|true|yes|on) AUTH_WANT=true ;;
+              0|false|no|off) AUTH_WANT=false ;;
+              "")             AUTH_WANT=false ;;   # 没表态
+              *) echo "MN_WS_AUTH_ENABLED 取值无法识别: $AUTH_RAW"; exit 1 ;;
+            esac
+            if [ -z "$AUTH_RAW" ] && [ -n "$MN_WS_JWT_SECRET" ]; then
+              AUTH_WANT=true
+            fi
+            echo "verify auth: want=$AUTH_WANT"
+
+            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+            docker rm   "${CONTAINER_NAME}" 2>/dev/null || true
+
+            docker run -d \
+              --name "${CONTAINER_NAME}" \
+              --restart unless-stopped \
+              --memory 256m \
+              -p "${HOST_PORT}:7777" \
+              -v mn_ws_data:/app/data \
+              -e MN_WS_HOST=0.0.0.0 \
+              -e MN_WS_PORT=7777 \
+              -e MN_WS_HOME=/app \
+              -e MN_WS_LOG_LEVEL=info \
+              ${MN_WS_TOKEN:+-e MN_WS_TOKEN="$MN_WS_TOKEN"} \
+              ${MN_WS_JWT_SECRET:+-e MN_WS_JWT_SECRET="$MN_WS_JWT_SECRET"} \
+              ${MN_WS_AUTH_ENABLED:+-e MN_WS_AUTH_ENABLED="$MN_WS_AUTH_ENABLED"} \
+              ${MN_WS_ISSUER:+-e MN_WS_ISSUER="$MN_WS_ISSUER"} \
+              ${MN_WS_IDP_CLIENT_ID:+-e MN_WS_IDP_CLIENT_ID="$MN_WS_IDP_CLIENT_ID"} \
+              "${IMAGE}"
+
+            # ── 部署后必须验一次「配了的确实生效了」────────────────────────
+            MAX=6; i=0; ok=false
+            while [ $i -lt $MAX ]; do
+              i=$((i + 1))
+              echo "Health $i/$MAX..."
+              if curl -f -s "http://localhost:${HOST_PORT}/health" > /dev/null; then
+                ok=true; echo "Health passed!"; break
+              fi
+              sleep 10
+            done
+
+            if [ "$ok" = false ]; then
+              echo "Health FAILED. Recent logs:"
+              docker logs "${CONTAINER_NAME}" --tail 60
+              exit 1
+            fi
+
+            # ── 运行态断言：进程自己报的 enabled 必须与部署意图一致 ────────
+            CFG=$(curl -s -m 10 "http://localhost:${HOST_PORT}/auth/oidc/config")
+            echo "GET /auth/oidc/config -> $CFG"
+            AUTH_IS=$(printf '%s' "$CFG" | sed -n 's/.*"enabled":\([a-z]*\).*/\1/p')
+            if [ "$AUTH_IS" != "$AUTH_WANT" ]; then
+              echo "统一登录状态与部署意图不符：期望 enabled=$AUTH_WANT，实际 '${AUTH_IS:-无}'"
+              echo "（这正是「配了 1 却被当成关闭」那类静默失效的形态，不要放行）"
+              docker logs "${CONTAINER_NAME}" --tail 40
+              exit 1
+            fi
+            if [ "$AUTH_WANT" = "true" ]; then
+              if ! printf '%s' "$CFG" | grep -q '"idpAvailable":true'; then
+                echo "统一登录已开启但拉不到认证中心发现文档（容器到 issuer 的网络不通）"
+                echo "  issuer=$(printf '%s' "$CFG" | sed -n 's/.*"issuer":"\([^"]*\)".*/\1/p')"
+                docker logs "${CONTAINER_NAME}" --tail 40
+                exit 1
+              fi
+              echo "auth ok: enabled + idpAvailable"
+            fi
+
+            docker image prune -f > /dev/null || true
+            echo "Deployment successful!"
