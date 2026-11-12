@@ -32,7 +32,7 @@ class FakeBridge {
   pending = new Map<string, (frame: Record<string, unknown>) => void>();
   registered: Promise<Record<string, unknown>>;
 
-  constructor(private url: string, private token: string, private apps: { app: string; base: string }[]) {
+  constructor(private url: string, private token: string, private apps: { app: string; base: string; title?: string }[]) {
     this.registered = new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       this.ws = ws;
@@ -42,7 +42,11 @@ class FakeBridge {
           type: FRAME.REGISTER,
           role: 'bridge',
           bridgeId: 'test-bridge',
-          apps,
+          apps: this.apps.map((a) => ({
+            app: a.app,
+            base: a.base,
+            ...(a.title ? { title: a.title } : {}),
+          })),
           token,
         }));
       });
@@ -176,8 +180,43 @@ test('端到端：无 L1 凭据 → 401；未知应用 → 404', async () => {
   await server.close();
 });
 
-test('元信息目录：只列出本桥注册的应用', async () => {
+test('动态注册的应用：标题原样进目录，且能被 X-Nx-App 命中', async () => {
   const nx = await startFakeNx();
+  const server = createServer({ host: '127.0.0.1', port: 0, token: 'gate-token', dataDir: null, logLevel: 'error' });
+  const port = await server.listen();
+  // 客户端自报标题（动态注册的应用没有已知表可查，标题是唯一线索）
+  const bridge = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [
+    { app: 'my-api', base: `http://127.0.0.1:${nx.port}`, title: '我的服务' },
+  ]);
+  await bridge.registered;
+
+  // ① 目录里能看到它，标题是客户端自报的那个
+  const cat = await httpGet(`http://127.0.0.1:${port}/api/catalog`, { 'x-mn-ws-token': 'gate-token' });
+  const j = JSON.parse(cat.body);
+  assert.equal(j.count, 1);
+  assert.equal(j.apps[0].app, 'my-api');
+  assert.equal(j.apps[0].title, '我的服务');
+  assert.equal(j.apps[0].port, nx.port);
+
+  // ② 远端用请求头命中它
+  const viaHeader = await httpGet(`http://127.0.0.1:${port}/api/ping`, {
+    'x-mn-ws-token': 'gate-token',
+    'x-nx-app': 'my-api',
+  });
+  assert.equal(viaHeader.status, 200, viaHeader.body);
+  assert.equal(JSON.parse(viaHeader.body).url, '/api/ping');
+
+  // ③ 路径前缀也命中它
+  const viaPath = await httpGet(`http://127.0.0.1:${port}/my-api/api/ping`, { 'x-mn-ws-token': 'gate-token' });
+  assert.equal(viaPath.status, 200, viaPath.body);
+  assert.equal(JSON.parse(viaPath.body).url, '/api/ping');
+
+  bridge.close();
+  await server.close();
+  await nx.close();
+});
+
+test('元信息目录：只列出本桥注册的应用', async () => {  const nx = await startFakeNx();
   const server = createServer({ host: '127.0.0.1', port: 0, token: 'gate-token', dataDir: null, logLevel: 'error' });
   const port = await server.listen();
   const bridge = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [

@@ -68,6 +68,50 @@ export default function BridgeView() {
   const candidates = apps?.candidates ?? [];
   const selected = new Set(configured.map((c) => c.app));
 
+  // ── 动态注册表单 ──────────────────────────────────────────────────
+  // 「运行时开放端口」：已知表（KNOWN_APPS）里没有的服务也能被桥出去 ——
+  // 给它起个名字和端口，它就进白名单，随注册帧上报给 server 半，
+  // 别的客户端从目录里看到之后用 X-Nx-App 就能打过来。
+  const [newName, setNewName] = useState('');
+  const [newPort, setNewPort] = useState('');
+  const [newTitle, setNewTitle] = useState('');
+
+  async function addCustom() {
+    const name = newName.trim();
+    if (!name) { setError('要先给应用起个名字'); return; }
+    const port = Number(newPort.trim());
+    setBusy(true);
+    setError('');
+    try {
+      const r = await client['bridge.apps.add']({
+        name,
+        port: Number.isFinite(port) && port > 0 ? port : undefined,
+        title: newTitle.trim() || undefined,
+      });
+      if (!r.ok) { setError(r.error || '注册失败'); return; }
+      setNewName(''); setNewPort(''); setNewTitle('');
+      await refresh();
+    } catch (e) {
+      setError(String((e as { message?: string })?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeCustom(app: string) {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await client['bridge.apps.remove']({ name: app });
+      if (!r.ok) { setError(r.error || '移除失败'); return; }
+      await refresh();
+    } catch (e) {
+      setError(String((e as { message?: string })?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggle(app: string, on: boolean) {
     const next = new Set(selected);
     if (on) next.add(app); else next.delete(app);
@@ -164,7 +208,9 @@ export default function BridgeView() {
                   <input type="checkbox" checked disabled readOnly />
                   <span>
                     {a.app} <span className="muted">{a.port ?? '—'}</span>{' '}
+                    {a.title && a.title !== a.app ? <span className="muted">{a.title}</span> : null}{' '}
                     {a.alive ? <span className="tag">在监听</span> : <span className="tag warn">未运行</span>}
+                    {a.custom ? <span className="tag">自定义</span> : null}
                   </span>
                 </label>
               ))}
@@ -193,15 +239,72 @@ export default function BridgeView() {
           {configured.length > 0 && (
             <div className="toolbar">
               {configured.map((a) => (
-                <button
-                  key={a.app}
-                  className="btn small ghost"
-                  disabled={busy}
-                  onClick={() => { void toggle(a.app, false); }}
-                >
-                  取消 {a.app}
-                </button>
+                a.custom ? (
+                  <button
+                    key={a.app}
+                    className="btn small ghost"
+                    disabled={busy}
+                    onClick={() => { void removeCustom(a.app); }}
+                  >
+                    移除 {a.app}
+                  </button>
+                ) : (
+                  <button
+                    key={a.app}
+                    className="btn small ghost"
+                    disabled={busy}
+                    onClick={() => { void toggle(a.app, false); }}
+                  >
+                    取消 {a.app}
+                  </button>
+                )
               ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 动态注册：把不在已知表里的本机服务也开放出来 */}
+      <div className="card">
+        <div className="colhead">
+          动态注册
+          <span className="right muted">
+            CLI 等价：<code>mn-ws apps add my-api --port 9999</code>
+          </span>
+        </div>
+        <div style={{ padding: 12 }} className="stack">
+          <div className="muted">
+            已知表里没有的服务也能被桥出去：给它起个**路由标识**（小写字母开头，
+            只含小写字母/数字/连字符）和端口，它就进白名单，随注册帧上报给 server 半 ——
+            别的客户端从目录里看到之后，用 <code>X-Nx-App: &lt;名字&gt;</code> 就能打过来。
+          </div>
+          <div className="toolbar">
+            <input
+              value={newName}
+              placeholder="路由标识，如 my-api"
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { void addCustom(); } }}
+            />
+            <input
+              value={newPort}
+              placeholder="端口，如 9999"
+              onChange={(e) => setNewPort(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { void addCustom(); } }}
+            />
+            <input
+              value={newTitle}
+              placeholder="显示名（可选）"
+              onChange={(e) => setNewTitle(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { void addCustom(); } }}
+            />
+            <button className="btn" disabled={busy} onClick={() => { void addCustom(); }}>
+              注册
+            </button>
+          </div>
+          {configured.filter((a) => a.custom).length > 0 && (
+            <div className="muted">
+              已注册的自定义应用：
+              {configured.filter((a) => a.custom).map((a) => ` ${a.app}(${a.port ?? '?'})`).join('')}
             </div>
           )}
         </div>

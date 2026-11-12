@@ -19,6 +19,8 @@ import { loadClientConfig, type ClientConfig } from './config.js';
 export interface ResolvedApps {
   /** app -> base */
   apps: Record<string, string>;
+  /** app -> 标题（自定义应用才有；已知应用的标题在 KNOWN_APPS 里） */
+  titles: Record<string, string>;
   /** 端口反查不到应用名时的提示 */
   unknownPorts: number[];
 }
@@ -39,9 +41,14 @@ export class MnWsController {
   /**
    * 解析白名单 → { app -> base }。
    *
-   * **白名单说了算**：只有 --apps / --ports / --app-map 列出的应用才会被桥。
-   * 端口探测只用来显示状态，**绝不因为「扫到端口在监听」就自动开桥** ——
+   * **白名单说了算**：只有 --apps / --ports / --app-map / 面板添加的自定义应用
+   * 才会被桥。端口探测只用来显示状态，**绝不因为「扫到端口在监听」就自动开桥** ——
    * 扫到就开桥等于把整台机器暴露出去。
+   *
+   * 三类来源合成一份：
+   *   ① 已知服务（KNOWN_APPS）—— 按名字或按端口反查
+   *   ② 显式基址（--app-map）—— 端口改了、容器映射等
+   *   ③ **自定义应用**（面板上动态注册的）—— 已知表里根本没有的服务
    */
   resolveApps(): ResolvedApps {
     const wanted = new Set(this.cfg.apps || []);
@@ -54,19 +61,41 @@ export class MnWsController {
       else unknownPorts.push(port);
     }
 
+    // 自定义应用：名字直接进白名单。
+    // ⚠️ 「是不是自定义」与「标题是什么」是两件事，不能共用一个 Map ——
+    //    没有标题的自定义应用曾因此被当成「不在表里」而整个丢掉。
+    const customNames = new Set<string>();
+    const custom = new Map<string, string>();
+    for (const a of this.cfg.customApps || []) {
+      wanted.add(a.name);
+      customNames.add(a.name);
+      if (a.title) custom.set(a.name, a.title);
+    }
+
     const apps: Record<string, string> = {};
+    const titles: Record<string, string> = {};
     for (const app of wanted) {
       const base =
         (this.cfg.appOverrides[app] && this.cfg.appOverrides[app].base) ||
+        (customNames.has(app) ? this.baseOfCustom(app) : '') ||
         (KNOWN_APPS[app] ? `http://127.0.0.1:${KNOWN_APPS[app].port}` : '');
-      if (base) apps[app] = base;
+      if (!base) continue;
+      apps[app] = base;
+      const t = custom.get(app);
+      if (t) titles[app] = t;
     }
-    return { apps, unknownPorts };
+    return { apps, titles, unknownPorts };
+  }
+
+  /** 自定义应用的基址。 */
+  private baseOfCustom(app: string): string {
+    const hit = (this.cfg.customApps || []).find((a) => a.name === app);
+    return hit ? hit.base : '';
   }
 
   /** 起桥。已连着就不重复起。 */
   start(): { started: boolean; apps: string[]; reason?: string } {
-    const { apps, unknownPorts } = this.resolveApps();
+    const { apps, titles, unknownPorts } = this.resolveApps();
     const names = Object.keys(apps);
     if (!names.length) {
       return { started: false, apps: [], reason: '白名单为空 —— 一个都不桥（用 --apps 指定）' };
@@ -78,7 +107,11 @@ export class MnWsController {
       url: this.cfg.url,
       token: this.session.credential() || this.cfg.token,
       bridgeId: this.cfg.clientId,
-      apps,
+      // 标题一起带上：动态注册的应用没有已知表可查，
+      // 标题是远端目录里唯一能认出它的线索。
+      apps: Object.fromEntries(
+        Object.entries(apps).map(([name, base]) => [name, { base, title: titles[name] }]),
+      ),
       onStatus: (s) => { this.lastStatus = s; },
     });
     this.client.start();

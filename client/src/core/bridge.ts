@@ -45,7 +45,7 @@ export interface RequestFrame extends Frame {
 }
 
 export class BridgeClient {
-  apps: Record<string, string>;
+  apps: Record<string, BridgeApp>;
   logger: BridgeLogger | null;
   send: (frame: unknown) => void;
   /** requestId -> 本地在跑的请求 */
@@ -56,7 +56,7 @@ export class BridgeClient {
     logger = null,
     send,
   }: {
-    apps?: Record<string, string>;
+    apps?: Record<string, BridgeApp>;
     logger?: BridgeLogger | null;
     send: (frame: unknown) => void;
   }) {
@@ -69,7 +69,7 @@ export class BridgeClient {
   async handleRequest(frame: RequestFrame): Promise<void> {
     const id = String(frame.id || '');
     const app = String(frame.app || '');
-    const base = this.apps[app];
+    const base = this.apps[app]?.base;
     if (!base) {
       this._respondError(id, 'unknown_app', `未注册应用 ${app}`);
       return;
@@ -195,12 +195,20 @@ export interface BridgeStatus {
   error?: string;
 }
 
+/** 一条被桥的应用：基址 + 可选标题。 */
+export interface BridgeApp {
+  base: string;
+  /** 显示名。动态注册的应用没有已知表可查，标题由用户给。 */
+  title?: string;
+}
+
 /** 连接器的构造参数。 */
 export interface WsBridgeClientOptions {
   url: string;
   token?: string;
   bridgeId?: string;
-  apps?: Record<string, string>;
+  /** app -> { base, title? } */
+  apps?: Record<string, BridgeApp>;
   logger?: BridgeLogger | null;
   onStatus?: (s: BridgeStatus) => void;
 }
@@ -216,7 +224,7 @@ export class WsBridgeClient {
   url: string;
   token: string;
   bridgeId: string;
-  apps: Record<string, string>;
+  apps: Record<string, BridgeApp>;
   logger: BridgeLogger | null;
   onStatus: (s: BridgeStatus) => void;
 
@@ -301,8 +309,10 @@ export class WsBridgeClient {
       this._setState('connected');
       // 注册：带上 app 表 + 每个 app 的元信息（标题、端口），
       // server 半据此汇总成**元信息目录**，远端客户端登录后先拉目录、
-      // 看清楚「哪些能路由」再选。
-      const apps: AppDescriptor[] = Object.entries(this.apps).map(([app, base]) => describeApp(app, base));
+      // 看清楚「哪些能路由」再选。标题是动态注册的应用唯一能被认出来的线索，
+      // 所以它必须一起报上去。
+      const apps: AppDescriptor[] = Object.entries(this.apps)
+        .map(([app, a]) => describeApp(app, a.base, a.title));
       this._send({
         type: FRAME.REGISTER,
         role: 'bridge',

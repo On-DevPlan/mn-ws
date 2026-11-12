@@ -208,8 +208,14 @@ export interface AppDescriptor {
  * client half 注册时把这份元信息一并报给 server half，server 把它汇总成
  * **元信息目录**（catalog）—— 远端客户端登录后先拉目录，看到「哪些能路由、
  * 各自是什么」，再决定调哪个。
+ *
+ * @param app   应用名（路由标识，必须匹配 APP_NAME_RE）
+ * @param base  本地基址，如 http://127.0.0.1:7877
+ * @param title 客户端自报的标题。**给了就用它的** ——
+ *   client 半知道「这个端口是我自己起的、叫什么」，server 不该替它猜。
+ *   不给才回落到已知表，再不给就用应用名兜底。
  */
-export function describeApp(app: string, base: string | null): AppDescriptor {
+export function describeApp(app: string, base: string | null, title?: string): AppDescriptor {
   const known = KNOWN_APPS[app] || null;
   let port: number | null = null;
   try {
@@ -217,11 +223,12 @@ export function describeApp(app: string, base: string | null): AppDescriptor {
   } catch {
     port = null;
   }
+  const label = (title || '').trim();
   return {
     app,
     base,
     port: port || (known ? known.port : null),
-    title: known ? known.title : app,
+    title: label || (known ? known.title : app),
     known: !!known,
   };
 }

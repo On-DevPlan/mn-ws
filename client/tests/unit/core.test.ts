@@ -18,6 +18,7 @@ import {
 } from '../../src/core/config.js';
 import { createAuthRequest, buildAuthorizeUrl, loginClientIdOf, b64url } from '../../src/core/auth.js';
 import { MnWsController } from '../../src/core/controller.js';
+import { addCustomApp, removeCustomApp } from '../../src/modules/bridge/service.js';
 
 /** 每个用例一份独立的配置目录。 */
 function withTempHome<T>(fn: (home: string) => T): T {
@@ -187,4 +188,74 @@ test('小工具', () => {
   assert.equal(isEnvTruthy('YES'), true);
   assert.equal(isEnvTruthy('off'), false);
   assert.equal(isEnvTruthy(undefined), false);
+});
+
+// ───────────────────── 动态注册（运行时开放端口）─────────────────────
+
+test('动态注册：加进去的应用进白名单，带基址与标题', () => {
+  withTempHome(() => {
+    const c = new MnWsController(loadClientConfig({}));
+    const r = addCustomApp(c, { name: 'my-api', port: 9999, title: '我的服务' });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.app, 'my-api');
+
+    const { apps, titles } = c.resolveApps();
+    assert.equal(apps['my-api'], 'http://127.0.0.1:9999');
+    assert.equal(titles['my-api'], '我的服务');
+    // 白名单是唯一的准入依据：自定义应用必须同时在 apps 里
+    assert.ok(c.cfg.apps.includes('my-api'));
+  });
+});
+
+test('动态注册：名字非法要当场拒绝（它要当路由标识用）', () => {
+  withTempHome(() => {
+    const c = new MnWsController(loadClientConfig({}));
+    for (const bad of ['', 'My-API', '-x', 'my_api', '1api', 'my api']) {
+      const r = addCustomApp(c, { name: bad, port: 9999 });
+      assert.equal(r.ok, false, `名字 ${JSON.stringify(bad)} 不该通过`);
+      assert.ok(r.error);
+    }
+  });
+});
+
+test('动态注册：端口缺失且没给基址 → 拒绝', () => {
+  withTempHome(() => {
+    const c = new MnWsController(loadClientConfig({}));
+    const r = addCustomApp(c, { name: 'my-api' });
+    assert.equal(r.ok, false);
+  });
+});
+
+test('动态注册：完整基址也行（https / 非默认主机）', () => {
+  withTempHome(() => {
+    const c = new MnWsController(loadClientConfig({}));
+    const r = addCustomApp(c, { name: 'my-api', base: 'https://api.example.com' });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(c.resolveApps().apps['my-api'], 'https://api.example.com');
+  });
+});
+
+test('动态注册：移除后它就不在白名单里了', () => {
+  withTempHome(() => {
+    const c = new MnWsController(loadClientConfig({}));
+    addCustomApp(c, { name: 'my-api', port: 9999 });
+    const r = removeCustomApp(c, 'my-api');
+    assert.equal(r.ok, true, r.error);
+    assert.equal('my-api' in c.resolveApps().apps, false);
+    assert.equal(c.cfg.apps.includes('my-api'), false);
+
+    // 移除不存在的 → 明确报错，不静默
+    assert.equal(removeCustomApp(c, 'my-api').ok, false);
+  });
+});
+
+test('动态注册：落盘后重新读配置还在', () => {
+  withTempHome(() => {
+    const c = new MnWsController(loadClientConfig({}));
+    addCustomApp(c, { name: 'my-api', port: 9999, title: '我的服务' });
+    // 重新从磁盘读（模拟重启）
+    const again = new MnWsController(loadClientConfig({}));
+    assert.equal(again.resolveApps().apps['my-api'], 'http://127.0.0.1:9999');
+    assert.equal(again.resolveApps().titles['my-api'], '我的服务');
+  });
 });

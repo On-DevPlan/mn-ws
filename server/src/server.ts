@@ -550,11 +550,15 @@ export function createServer(userConfig: ServerOptions = {}) {
     const apps = Array.isArray(msg.apps) ? (msg.apps as unknown[]) : [];
     const clean: AppDescriptor[] = [];
     for (const a of apps) {
-      const item = (a || {}) as { app?: unknown; base?: unknown };
+      const item = (a || {}) as { app?: unknown; base?: unknown; title?: unknown };
       if (!item || typeof item.app !== 'string') continue;
-      // 补全元信息（标题 / 端口）—— client 报的是它本地认定的元信息，
-      // server 只做归一化，不去猜。
-      clean.push(describeApp(item.app, String(item.base || '')));
+      // 归一化元信息（标题 / 端口）—— client 报的是它本地认定的元信息，
+      // server 不去猜：client 给了标题就用它的（动态注册的应用没有已知表可查）。
+      clean.push(describeApp(
+        item.app,
+        String(item.base || ''),
+        typeof item.title === 'string' ? item.title : undefined,
+      ));
     }
 
     // 同 app 被别的桥占用 → 顶替（旧桥的该 app 摘掉）

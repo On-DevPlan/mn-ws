@@ -15,7 +15,7 @@ import { defineModule } from '../../runtime/types/module.js';
 import { getController } from '../../core/controller.js';
 import { parseApps } from '../../core/config.js';
 import {
-  bridgeStatus, bridgeApps, setWhitelist, remoteCatalog,
+  bridgeStatus, bridgeApps, setWhitelist, remoteCatalog, addCustomApp, removeCustomApp,
   renderStatus, renderApps, renderWhitelist,
   type BridgeStatusView, type BridgeAppsView, type CatalogView,
 } from './service.js';
@@ -69,6 +69,38 @@ export default defineModule({
         return setWhitelist(getController(), { apps, ports, appMap: Object.fromEntries(appMap) });
       },
       (r) => renderWhitelist(r),
+    ),
+
+    defineAction({
+      id: 'bridge.apps.add',
+      cli: ['apps', 'add'],
+      http: ['POST', '/api/bridge/apps/add'],
+      summary: '动态注册一个自定义应用（不在已知表里的本机服务）：名字 + 端口',
+      args: [{ name: 'name', required: true }],
+      flags: {
+        port: { type: 'number', hint: '本机端口（默认 127.0.0.1）' },
+        base: { type: 'string', hint: '完整基址（给了就优先用它）' },
+        title: { type: 'string', hint: '显示名（远端目录里给人看）' },
+      },
+    })(
+      (ctx) => addCustomApp(getController(), {
+        name: String(ctx.name || ''),
+        port: typeof ctx.port === 'number' ? ctx.port : undefined,
+        base: ctx.base ? String(ctx.base) : undefined,
+        title: ctx.title ? String(ctx.title) : undefined,
+      }),
+      (r) => (r.ok ? `已注册 ${r.app}（${r.base}）· 现在可桥：${r.apps.join(', ')}` : `注册失败：${r.error}`),
+    ),
+
+    defineAction({
+      id: 'bridge.apps.remove',
+      cli: ['apps', 'remove'],
+      http: ['POST', '/api/bridge/apps/remove'],
+      summary: '移除一个自定义应用',
+      args: [{ name: 'name', required: true }],
+    })(
+      (ctx) => removeCustomApp(getController(), String(ctx.name || '')),
+      (r) => (r.ok ? `已移除 ${r.removed} · 现在可桥：${r.apps.join(', ') || '（空）'}` : `移除失败：${r.error}`),
     ),
 
     defineAction({

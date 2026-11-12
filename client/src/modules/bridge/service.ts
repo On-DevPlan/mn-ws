@@ -1,7 +1,7 @@
 import { scanApps, KNOWN_APPS } from 'mn-ws-server/apps';
 
 import type { MnWsController } from '../../core/controller.js';
-import { readConfigFile, writeConfigFile } from '../../core/config.js';
+import { readConfigFile, writeConfigFile, saveCustomApps, CUSTOM_APP_NAME_RE, type CustomApp } from '../../core/config.js';
 import { badInput } from '../../core/errors/index.js';
 
 /** 桥接状态视图。 */
@@ -24,7 +24,7 @@ export interface BridgeStatusView {
 /** 可桥接应用清单。 */
 export interface BridgeAppsView {
   /** 白名单里的应用 + 端口存活 */
-  configured: { app: string; title: string; port: number | null; base: string | null; alive: boolean }[];
+  configured: { app: string; title: string; port: number | null; base: string | null; alive: boolean; custom: boolean }[];
   /** 本机已知但不在白名单里的（供面板勾选） */
   candidates: { app: string; title: string; port: number; alive: boolean }[];
 }
@@ -57,11 +57,15 @@ export function bridgeStatus(c: MnWsController): BridgeStatusView {
 
 /** 可桥接应用清单：白名单 + 端口存活探测 + 候选项。 */
 export async function bridgeApps(c: MnWsController): Promise<BridgeAppsView> {
-  const { apps: whitelist } = c.resolveApps();
+  const { apps: whitelist, titles } = c.resolveApps();
   const names = Object.keys(whitelist);
   const overrides = c.cfg.appOverrides;
 
-  const configured = await scanApps({ host: '127.0.0.1', apps: names, overrides });
+  const configured = (await scanApps({ host: '127.0.0.1', apps: names, overrides })).map((a) => ({
+    ...a,
+    title: titles[a.app] || a.title,
+    custom: !!(c.cfg.customApps || []).find((x) => x.name === a.app),
+  }));
 
   // 候选项：已知表里没进白名单的（面板据此勾选）
   const rest = Object.keys(KNOWN_APPS).filter((a) => !names.includes(a));
@@ -71,6 +75,91 @@ export async function bridgeApps(c: MnWsController): Promise<BridgeAppsView> {
     .map((x) => ({ app: x.app, title: x.title, port: x.port as number, alive: x.alive }));
 
   return { configured, candidates };
+}
+
+/**
+ * 动态注册一个**自定义应用**（不在已知服务表里的本机服务）。
+ *
+ * 这条是「运行时开放端口」的落点：用户起了一个临时服务（或某个服务换了端口），
+ * 在面板上给它起个名字和端口，它就进了白名单，随注册帧上报给 server 半，
+ * 别的客户端从目录里看到之后用 `X-Nx-App: <名字>` 就能打过来。
+ *
+ * 名字要当**路由标识**用（小写字母开头 + 小写字母/数字/连字符），
+ * 基址要么给端口（默认本机回环），要么给完整 URL。
+ */
+export function addCustomApp(
+  c: MnWsController,
+  input: { name: string; port?: number; base?: string; title?: string },
+): { ok: boolean; app?: string; base?: string; apps: string[]; error?: string } {
+  const name = String(input.name || '').trim();
+  if (!CUSTOM_APP_NAME_RE.test(name)) {
+    return {
+      ok: false,
+      apps: Object.keys(c.resolveApps().apps),
+      error: `应用名不合法：${name || '(空)'}（要小写字母开头，只含小写字母/数字/连字符，最长 32 位）`,
+    };
+  }
+
+  let base = String(input.base || '').trim();
+  if (!base && input.port) {
+    base = `http://127.0.0.1:${input.port}`;
+  }
+  if (!base) {
+    return { ok: false, apps: Object.keys(c.resolveApps().apps), error: '要给端口或完整基址' };
+  }
+  try {
+    const u = new URL(base);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return { ok: false, apps: Object.keys(c.resolveApps().apps), error: '基址只支持 http / https' };
+    }
+    base = u.origin;
+  } catch {
+    return { ok: false, apps: Object.keys(c.resolveApps().apps), error: `基址不是合法 URL：${base}` };
+  }
+
+  const title = String(input.title || '').trim();
+  const list = (c.cfg.customApps || []).filter((a) => a.name !== name);
+  list.push(title ? { name, base, title } : { name, base });
+
+  saveCustomApps(list);
+  c.cfg.customApps = list;
+  if (!c.cfg.apps.includes(name)) c.cfg.apps = [...c.cfg.apps, name];
+
+  const applied = restartBridge(c);
+  return { ok: true, app: name, base, apps: Object.keys(c.resolveApps().apps), ...(applied ? {} : {}) };
+}
+
+/** 移除一个自定义应用（连带把它从白名单里摘掉）。 */
+export function removeCustomApp(
+  c: MnWsController,
+  name: string,
+): { ok: boolean; removed: string; apps: string[]; error?: string } {
+  const key = String(name || '').trim();
+  const list = c.cfg.customApps || [];
+  if (!list.find((a) => a.name === key)) {
+    return { ok: false, removed: '', apps: Object.keys(c.resolveApps().apps), error: `没有这个自定义应用：${key}` };
+  }
+  const next = list.filter((a) => a.name !== key);
+  saveCustomApps(next);
+  c.cfg.customApps = next;
+  c.cfg.apps = c.cfg.apps.filter((a) => a !== key);
+
+  restartBridge(c);
+  return { ok: true, removed: key, apps: Object.keys(c.resolveApps().apps) };
+}
+
+/**
+ * 让运行中的桥按新白名单重注册。
+ *
+ * 为什么是「停掉再起」而不是增量更新：server 半的注册帧是**整张 app 表**
+ * （`bridges` 按 app 索引，后来者顶替前者）。增删一个应用 = 整张表变了，
+ * 重注册最简单，也不用给协议加增量语义。
+ */
+function restartBridge(c: MnWsController): boolean {
+  if (!c.client) return false;
+  c.stop();
+  c.start();
+  return true;
 }
 
 /** 设置白名单。落盘并让运行中的桥按新白名单重注册。 */
