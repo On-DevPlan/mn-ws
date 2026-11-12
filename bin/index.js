@@ -450,7 +450,13 @@ async function cmdAuth(cfg, rest, flags = {}) {
         promptLogin: flags.newAccount === true,
         onUrl: (url) => {
           say('');
-          say(`${C.yellow}请在弹出的浏览器里完成统一登录${C.reset}（未自动弹出就手动打开下面地址）`);
+          if (cfg.noOpen === true) {
+            // --no-open 不会弹浏览器，等回调的话更是不存在 —— 文案要说实话
+            say(`${C.yellow}请在浏览器里完成统一登录${C.reset}`
+              + `${C.dim}（--no-open：不会自动弹出，请手动打开下面地址）${C.reset}`);
+          } else {
+            say(`${C.yellow}请在弹出的浏览器里完成统一登录${C.reset}（未自动弹出就手动打开下面地址）`);
+          }
           if (flags.newAccount === true) {
             say(`${C.dim}已带 prompt=login：认证中心会要求重新登录账号${C.reset}`);
           } else if (listAccounts(view).length >= 1) {
@@ -458,12 +464,29 @@ async function cmdAuth(cfg, rest, flags = {}) {
           }
           say(`${C.dim}${url}${C.reset}`);
           say('');
-          say(`${C.dim}等待授权回调…（5 分钟超时）${C.reset}`);
+          if (cfg.noOpen !== true) {
+            say(`${C.dim}等待授权回调…（5 分钟超时）${C.reset}`);
+          }
         },
       });
     } catch (e) {
       say(`${C.red}✗ 登录失败${C.reset}：${e.message}`);
       process.exitCode = 1;
+      return;
+    }
+
+    // ── --no-open：只打印授权地址，没走完授权 ──────────────────────────────
+    //
+    // 必须在保存账号**之前**挡住：`--no-open` 模式下 authLogin 直接返回
+    // {authorizeUrl, pending:true}，**没有令牌、也没有身份**。
+    // 若继续往下走，saveAuthAccount 会把一条空账号（deviceToken=undefined）
+    // 写进配置并**顶替当前账号**，同时打印「✓ 登录成功」。
+    // 后果是：本机登录态被一条没有令牌的记录覆盖，
+    // 之后 client 注册会拿一个空令牌去连，被 server 拒，而提示却是「登录成功过」。
+    if (res.pending) {
+      say('');
+      say(`${C.yellow}已打印授权地址，未继续登录${C.reset}${C.dim}（--no-open 只做这一步）${C.reset}`);
+      say(`${C.dim}在浏览器里完成授权后，再执行 npx mn-ws auth login（不带 --no-open）换回设备令牌${C.reset}`);
       return;
     }
 

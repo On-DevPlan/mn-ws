@@ -10,6 +10,7 @@
  */
 
 const assert = require('node:assert');
+const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -219,6 +220,52 @@ async function check(name, fn) {
     assert.ok(r.code === 0 || r.code === 1);
     assert.ok(r.out.includes('端口'), r.out);
   });
+
+  // ── auth login --no-open：只打印地址，**不许碰本机登录态** ──────────────
+  //
+  // 这条要单独起一个开了统一登录的 server：/auth/oidc/config 里 enabled=true
+  // 才会走 --no-open 那条路。issuer 指向**云端 go-ah**（47 服务器）——
+  // 公开参数里的 authorizationEndpoint 就是从它的发现文档拼出来的，
+  // 用真地址才能验到「CLI 把浏览器指向云端 IdP 且用的是 client 半的身份」。
+  const authPort = 18795;
+  const CLOUD_IDP = 'http://47.110.80.47:8082';
+  const authProc = spawn(process.execPath, [
+    BIN, 'server', '--host', '127.0.0.1', '--port', String(authPort),
+    '--token', GATE, '--log-level', 'warn', '--auth-enabled', '1',
+    '--issuer', CLOUD_IDP,
+  ], {
+    cwd: ROOT,
+    env: { ...process.env, MN_WS_HOME: SMOKE_HOME, MN_WS_JWT_SECRET: 'smoke-jwt-secret' },
+  });
+  let authLog = '';
+  authProc.stdout.on('data', (c) => { authLog += c.toString(); });
+  authProc.stderr.on('data', (c) => { authLog += c.toString(); });
+  await sleep(1500);
+
+  await check('auth login --no-open 指向云端 go-ah 且用的是 client 半的身份', async () => {
+    const r = await run(['auth', 'login', '--no-open',
+      '--server-http', `http://127.0.0.1:${authPort}`]);
+    assert.strictEqual(r.code, 0, r.err || r.out);
+    assert.ok(r.out.includes('47.110.80.47:8082/oauth2/auth'), r.out);
+    assert.ok(/client_id=mn-ws-client/.test(r.out), r.out);
+    assert.ok(/未继续登录/.test(r.out), r.out);
+    // --no-open 不会弹浏览器，文案不能还说「在弹出的浏览器里」「等待授权回调」
+    assert.ok(!/弹出的浏览器/.test(r.out), r.out);
+    assert.ok(!/等待授权回调/.test(r.out), r.out);
+    // 没走完授权，就不能报「登录成功」
+    assert.ok(!/✓ 登录成功/.test(r.out), r.out);
+  });
+
+  await check('auth login --no-open 不写本机登录态（不存空账号）', () => {
+    const f = path.join(SMOKE_HOME, 'config.json');
+    const raw = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : {};
+    assert.ok(!raw.accounts || Object.keys(raw.accounts).length === 0,
+      `--no-open 不该写账号，实际：${JSON.stringify(raw.accounts)}`);
+    assert.ok(!raw.activeAccount, `--no-open 不该有激活账号，实际：${raw.activeAccount}`);
+  });
+
+  try { authProc.kill(); } catch { /* ignore */ }
+  await sleep(200);
 
   try { clientProc.kill(); } catch { /* ignore */ }
   try { serverProc.kill(); } catch { /* ignore */ }

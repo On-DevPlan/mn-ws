@@ -506,6 +506,41 @@ async function testOidcIdentitySplit() {
   });
 }
 
+// ============================ 命令行解析 ============================
+
+/**
+ * `--no-X` 是**一个名叫 noX 的正向开关**，不是取反。
+ *
+ * 曾经的坑：parseArgs 里写了「`--no-` 前缀 = 取反」的分支，
+ * 于是 `--no-open` 变成 `open=false`，而读它的地方是 `cfg.noOpen` ——
+ * **这个开关等于没有**：`auth login --no-open` 照样弹浏览器，然后干等 5 分钟。
+ * mn-rt 的 parseArgs 从来没有这个分支，约定就是 `--no-open` → `noOpen=true`。
+ */
+async function testCliParsing() {
+  group('命令行解析');
+
+  await test('--no-open 是正向开关（noOpen=true）', () => {
+    const { parseArgs } = require('../lib/config');
+    const { flags } = parseArgs(['auth', 'login', '--no-open']);
+    assert.strictEqual(flags.noOpen, true);
+    assert.strictEqual(flags.open, undefined);
+  });
+
+  await test('--no-open 后面跟子命令时不吞参数', () => {
+    const { parseArgs } = require('../lib/config');
+    const { flags, positional } = parseArgs(['auth', 'login', '--no-open']);
+    assert.deepStrictEqual(positional, ['auth', 'login']);
+    assert.strictEqual(flags.noOpen, true);
+  });
+
+  await test('多词参数按驼峰映射', () => {
+    const { parseArgs } = require('../lib/config');
+    const { flags } = parseArgs(['--client-id', 'abc', '--login-client-id=mn-ws-client']);
+    assert.strictEqual(flags.clientId, 'abc');
+    assert.strictEqual(flags.loginClientId, 'mn-ws-client');
+  });
+}
+
 // ============================ 多路复用 + 元信息目录 ============================
 
 /**
@@ -667,6 +702,7 @@ function httpReq(method, url, body, headers = {}) {
   await testProtocol();
   await testPortGuard();
   await testDefaultPort();
+  await testCliParsing();
   await testOidcIdentitySplit();
   await testDiscoveryWarmUp();
   await testEndToEnd();
