@@ -27,6 +27,7 @@ on:
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
       - 'Dockerfile'
+      - '.dockerignore'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
