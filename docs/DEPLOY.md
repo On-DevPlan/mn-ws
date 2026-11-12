@@ -115,6 +115,23 @@ git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
 
 ---
 
+## 已验证（2026-11-12 首次上线）
+
+| 项 | 结果 |
+|---|---|
+| 容器 | `mn_ws_server` up，`0.0.0.0:7777->7777/tcp` |
+| `/health` | `{"ok":true,"service":"mn-ws-server","authEnabled":true}` |
+| `/auth/oidc/config` | `enabled=true` + `idpAvailable=true`（认证中心发现文档拉到） |
+| 公网端到端 | 远端 HTTP 客户端 → 公网 server → WS → 本机 nx-kv，**10/10 通过** |
+| 路由两种写法 | 路径前缀 `/nx-kv/api/ping` 与请求头 `X-Nx-App: nx-kv` + `/api/ping` 结果一致 |
+| L1 拦截 | 无 `X-Mn-Ws-Token` → 401；未知应用 → 404 `unknown_app` |
+| L3 透传 | 业务 action 被 **nx-kv 自己的鉴权**拦下（`未登录或登录已过期`），说明桥没改写凭据 |
+
+> 「被 nx 自己的鉴权拦下」在这里是**好结果**：它证明请求完整穿过了
+> server → WS → client 半 → nx，而拦它的是 nx 那层（L3），不是桥。
+
+---
+
 ## 已知风险
 
 - **内存**：宿机 available 常年紧张。容器冷启动可用；若频繁 OOM 重启，
