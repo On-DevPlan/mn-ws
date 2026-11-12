@@ -453,6 +453,8 @@ mn-ws 的两端分处公网与内网，吊销诉求本来就不一样。
 | **K24** | **测试读到了本机的真实配置** | 冒烟测试的子进程继承 `process.env`，配置目录默认是 `~/.mn-ws` —— 那里存着用户的门禁 token。于是「server 无鉴权时拒绝启动」那条用例**真的把 server 起了**，子进程永不退出 → `run()` 永不 resolve → **整个套件挂死**，CI 上表现为任务超时，看不出是哪条用例的问题 | 测试子进程一律带 `MN_WS_HOME=<临时目录>`（配置隔离）；`run()` 加兜底超时（子进程不退出就判那条用例失败，而不是拖死整个套件） |
 | **K25** | **一个 client_id 承担两端** | server 半与 client 半共用 `mn-ws` 一个 client_id → 认证中心里**分不清是哪个平台在发 token**，也无法只吊销一端 | 拆成 `mn-ws-server`（server 半的身份）与 `mn-ws-client`（client 半发起授权码流程）；server 半通过 `/auth/oidc/config` 的 `loginClientId` 字段把后者告诉 client，新装的 client 零配置 |
 | **K26** | **认证中心没登记这个 client** | `auth login` 在 authorize 端点被拒：`400 invalid client_id`。表现为「登录点开就报错」，但本地看不出是「没登记」—— 因为它长得像「redirect_uri 不在白名单」 | 登记走 go-ah 的管理 API `POST /api/admin/clients`（公共客户端 + PKCE + 回环通配）；**注意它不是种子**（`template-web-client`/`oidc-cli`/`fr-app`/`mn-rt` 才是），所以重建库时不会自动带上，要重新登记 |
+| **K27** | **把 `--no-X` 当成取反开关** | `parseArgs` 里写了「`--no-` 前缀 = 取反」的分支 → `--no-open` 被解析成 `open=false`；而读它的地方是 `cfg.noOpen` → **永远是 undefined**。于是 `auth login --no-open` 照样弹浏览器、干等 5 分钟超时 —— 这个开关等于没有，只在「无桌面环境 / SSH 过去登录」这条路上暴露 | `--no-X` 是**一个名叫 noX 的正向开关**（与 mn-rt 的 parseArgs 一致）；`--no-open` 的语义另有第二处坑见 K28 |
+| **K28** | **半途而废的登录把空账号写进配置** | `--no-open` 模式下 `authLogin` 只返回 `{authorizeUrl, pending:true}` —— 没有令牌也没有身份。若调用方不看 `pending` 就继续走保存流程，会存进一条 `deviceToken=undefined` 的账号、**顶替当前账号**，并打印「✓ 登录成功」。之后 client 注册拿空令牌去连被拒，而提示却说「登录成功过」 | 调用方在保存账号**之前**检查 `res.pending` 并如实说「已打印授权地址，未继续登录」；文案也要跟着改对（`--no-open` 不会弹浏览器、也不等回调，文案不能还说「在弹出的浏览器里」「等待授权回调」） |
 
 ---
 
