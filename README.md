@@ -310,8 +310,8 @@ POST /auth/oidc/callback
 ```bash
 pnpm install
 pnpm -r build                            # 两个包
-pnpm --filter mn-ws-server test          # 34 例（协议 / 端到端 / 鉴权 / 多路复用 / 业务令牌）
-pnpm --filter mn-ws test:unit            # 66 例（配置 / 账号簿 / PKCE / 白名单 / 面板）
+pnpm --filter mn-ws-server test          # 35 例（协议 / 端到端 / 鉴权 / 多路复用 / 业务令牌 / 心跳）
+pnpm --filter mn-ws test:unit            # 68 例（配置 / 账号簿 / PKCE / 白名单 / 面板）
 pnpm --filter mn-ws test:e2e             # 打已部署的公网 server 半做远端验收
 ```
 

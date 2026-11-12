@@ -110,6 +110,7 @@ mn-ws **不是** mn-rt 的变种，是**同构复制**。这是本设计最大�
 | 职责 | 说明 |
 |---|---|
 | HTTP 面 | `/health`、`/stats`、`/clients`（列出已注册 bridge 与 app）、`/push`（测试用）、`/<app>/*`（桥接） |
+| 认证面 | `/auth/oidc/config`（公开参数）、`/auth/oidc/callback`（**业务令牌端点**：收 code + verifier，服务端自己换码，认证中心的凭据不出服务端）、`/auth/verify`（拿认证中心 access_token 换设备令牌，给本机 CLI 用） |
 | WS 面 | `/ws`，与 HTTP **同端口共存**（`WebSocketServer({ server: httpServer, path })`） |
 | 路由表 | `bridges: Map<app, { ws, bridgeId, apps }>` |
 | 待答表 | `pending: Map<requestId, { res, timer, bridgeId }>` |
@@ -468,6 +469,8 @@ mn-ws 的两端分处公网与内网，吊销诉求本来就不一样。
 | **K35** | **把某个服务族的名字与端口写进发行包** | 发行包里内置了一张「本机可能有什么」的应用表（名字 → 默认端口 → 标题）。于是：① 桥背上别人的业务知识 —— 那个族一改版，桥就得跟着改；② 想桥一个不在表里的服务，只能走「动态注册」这条补丁路径；③ 表里的服务**换端口**就得改代码 | 发行包里**不留任何具体服务的知识**。桥只认「名字 + 基址 + 标题」这一层抽象，登记表完全由使用者填（`--apps name=base` / 面板动态登记）。server 半从注册帧里学到它们，自己不查任何表 |
 | **K36** | **业务令牌该在客户端换还是在服务端换** | 先做成了「客户端拿授权码去认证中心换 access_token，再拿它来换本服务令牌」—— 换码在客户端。后果是：**认证中心那张 access_token 流经了客户端**。它指向的是整个平台的身份，截获即等于账号接管；而客户端与服务端之间的那一跳还是明文 | 换码放**服务端**：`POST /auth/oidc/callback` 收 code + verifier，服务端拿 **client 半的身份**（`mn-ws-client`）去认证中心换，再签一枚本服务自己的令牌。认证中心那张票一次都不出服务端。业务令牌因此天然归属业务方 —— 与 mn-rt 的 `/auth/oidc/callback` 完全同构 |
 | **K37** | **半开的 TCP 连接不会被发现** | 容器被 `docker rm` 掉时，对端不一定发来 FIN/RST（跨境链路 + 运营商 NAT 下 RST 会丢）。于是客户端以为「还连着」，实际上一帧也发不出去：面板显示已连接，所有请求却 502，而且**永远不会自己恢复**（server 那边也一样：死桥的 app 一直挂在路由表里） | 两端都定期 ping 对方（协议级 ping/pong）：客户端收不到 pong 就 `terminate`，让 close 事件触发重连；服务端收不到 pong 就踢掉那条连接，路由表不留僵尸 |
+| **K38** | **心跳的「复位」代码不在，心跳就变成「杀连接器」** | isAlive 配方的两半：`isAlive = true`（连接时）+ `pong` 事件里复位。少了后半句，心跳每轮把标记压成 false 之后**没人复位** → 下一轮直接 terminate。症状是桥**每 30 秒被踢一次**、重连、再被踢，看着像「刚连上就断」。而别的测试全绿 —— 连接死之前它们早跑完了 | 这两行**不能少**，且要在旁边写明为什么。回归测试的做法：把心跳间隔做成可配置（`heartbeatIntervalMs`，默认 15s），测试传 60ms 让连接连过 5 轮心跳再断言它还活着 —— 这样既跑得快，又真的能抓住这个错 |
+| **K39** | **ESM 包里的 CommonJS 脚本** | client 包的 package.json 写着 `"type": "module"`，于是 `tests/e2e-remote.js`（用 require 写的）被当 ESM 加载 → `require is not defined`。`pnpm test:e2e` 从 monorepo 改造那天起就没能跑过，一直没人发现 | CommonJS 脚本一律用 `.cjs` 后缀，并同步改 package.json 里的脚本路径。**验收脚本跑不起来，等于没有验收** |
 
 ---
 
