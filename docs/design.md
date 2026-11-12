@@ -422,6 +422,7 @@ client 半：pendingLocal.set(id, req) → 收到 abort 时销毁对应 req
 | **K20** | **路径第一段被误认成 app** | `/api/todo/list` 的第一段 `api` 全小写、合法字符 → 被当成 app 名，请求路由到不存在的 app | 维护一张**保留路径段**表（api/auth/health/stats/clients/push/ws/files/assets/static），这些段永远不当 app |
 | **K21** | **端口号散落各处** | server 默认端口写在 `server/server.js`、`lib/config.js`、CLI 帮助、README、设计文档里 —— 改一处忘三处，文档与实现对不上 | 端口只认 `lib/config.js` 里的 `DEFAULT_SERVER_PORT` / `DEFAULT_WEB_PORT` 两个常量；`server/server.js` 与 `client/web.js` 的兜底值必须与之一致（改端口 = 改这两行 + 文档），并有单测兜住 |
 | **K22** | **同机既跑 server 又开面板** | server 默认绑 `0.0.0.0:7777`，面板默认绑 `127.0.0.1:7777` → 后者 EADDRINUSE | 端口预检**明确报错**并提示 `--web-port` 换端口，不静默顺延（顺延 = 两边对不上账）。面板默认端口与 server 相同是有意为之：面板跑在 client 那台机器上，client 连的是远端 server，本机默认不会有 7777 冲突 |
+| **K23** | **`idpAvailable` 的语义是「拉到过」，不是「在线」** | `/auth/oidc/config` 报的 `idpAvailable` = 是否**成功拉取过**发现文档。不做启动预热 → 这个字段永远是 false → 部署脚本据此断言「统一登录生效」→ 把一个完全正常的部署判成失败（认证中心明明可达，容器里 wget 也拉得到，就是没人去拉） | 启动时后台预热发现文档（**失败不固化缓存**，带重试：容器可能比认证中心先起来）；部署脚本对 `idpAvailable` 轮询而不是一上来就判死 |
 
 ---
 

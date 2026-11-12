@@ -362,6 +362,77 @@ async function testDefaultPort() {
   });
 }
 
+// ============================ 统一登录：发现文档预热 ============================
+
+/**
+ * 发现文档预热（回归防护）。
+ *
+ * 曾经的坑：`/auth/oidc/config` 报的 `idpAvailable` 含义是
+ * 「**成功拉到过**发现文档」，不是「认证中心在线」。
+ * 没做启动预热时这个字段永远是 false —— 部署脚本正是拿它断言
+ * 「统一登录确实生效」，于是一个完全正常的部署会被判成失败
+ * （认证中心明明可达，容器里 wget 也拉得到，就是没人去拉）。
+ */
+async function testDiscoveryWarmUp() {
+  group('统一登录发现文档预热');
+
+  // 假 IdP：只提供发现文档
+  const idp = http.createServer((req, res) => {
+    if (req.url.startsWith('/.well-known/openid-configuration')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        issuer: `http://127.0.0.1:${idp.address().port}`,
+        authorization_endpoint: 'http://127.0.0.1/oauth2/auth',
+        token_endpoint: 'http://127.0.0.1/oauth2/token',
+        userinfo_endpoint: 'http://127.0.0.1/oauth2/userinfo',
+      }));
+      return;
+    }
+    res.writeHead(404);
+    res.end('nope');
+  });
+  const idpPort = await new Promise((resolve) => {
+    idp.listen(0, '127.0.0.1', () => resolve(idp.address().port));
+  });
+
+  const server = createServer({
+    host: '127.0.0.1',
+    port: 0,
+    token: 'gate',
+    authEnabled: true,
+    jwtSecret: 'test-jwt-secret',
+    issuer: `http://127.0.0.1:${idpPort}`,
+    idpClientId: 'mn-ws-test',
+    dataDir: null,
+    logLevel: 'error',
+  });
+  const actualPort = await server.listen();
+
+  await test('预热成功后 /auth/oidc/config 报 idpAvailable=true', async () => {
+    // 预热是后台异步的 —— 本地假 IdP 通常几十毫秒就绪
+    let cfg = null;
+    for (let i = 0; i < 50; i += 1) {
+      const res = await httpGet(`http://127.0.0.1:${actualPort}/auth/oidc/config`);
+      cfg = JSON.parse(res.body);
+      if (cfg.idpAvailable) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(cfg, '没拿到 /auth/oidc/config');
+    assert.strictEqual(cfg.enabled, true);
+    assert.strictEqual(cfg.idpAvailable, true, JSON.stringify(cfg));
+    assert.strictEqual(cfg.clientId, 'mn-ws-test');
+  });
+
+  await test('公开配置里绝不含 secret', async () => {
+    const res = await httpGet(`http://127.0.0.1:${actualPort}/auth/oidc/config`);
+    assert.ok(!/test-jwt-secret/.test(res.body), '响应里漏了 JWT secret');
+    assert.ok(!/secret/i.test(res.body.replace(/"idpError":"[^"]*"/g, '')), '响应里出现了 secret 字样');
+  });
+
+  await server.close();
+  await new Promise((r) => idp.close(r));
+}
+
 // ============================ 多路复用 + 元信息目录 ============================
 
 /**
@@ -523,6 +594,7 @@ function httpReq(method, url, body, headers = {}) {
   await testProtocol();
   await testPortGuard();
   await testDefaultPort();
+  await testDiscoveryWarmUp();
   await testEndToEnd();
   await testMultiplex();
   process.stdout.write(`\n通过 ${passed}，失败 ${failed}\n`);

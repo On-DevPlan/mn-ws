@@ -203,24 +203,40 @@ jobs:
             fi
 
             # ── 运行态断言：进程自己报的 enabled 必须与部署意图一致 ────────
-            CFG=$(curl -s -m 10 "http://localhost:${HOST_PORT}/auth/oidc/config")
-            echo "GET /auth/oidc/config -> $CFG"
-            AUTH_IS=$(printf '%s' "$CFG" | sed -n 's/.*"enabled":\([a-z]*\).*/\1/p')
-            if [ "$AUTH_IS" != "$AUTH_WANT" ]; then
-              echo "统一登录状态与部署意图不符：期望 enabled=$AUTH_WANT，实际 '${AUTH_IS:-无}'"
-              echo "（这正是「配了 1 却被当成关闭」那类静默失效的形态，不要放行）"
-              docker logs "${CONTAINER_NAME}" --tail 40
-              exit 1
-            fi
-            if [ "$AUTH_WANT" = "true" ]; then
-              if ! printf '%s' "$CFG" | grep -q '"idpAvailable":true'; then
-                echo "统一登录已开启但拉不到认证中心发现文档（容器到 issuer 的网络不通）"
-                echo "  issuer=$(printf '%s' "$CFG" | sed -n 's/.*"issuer":"\([^"]*\)".*/\1/p')"
+            # enabled 是同步可判的；idpAvailable 取决于**后台预热**是否完成，
+            # 所以给它一点时间轮询，而不是一上来就判死。
+            MAXC=6; c=0
+            while :; do
+              CFG=$(curl -s -m 10 "http://localhost:${HOST_PORT}/auth/oidc/config")
+              AUTH_IS=$(printf '%s' "$CFG" | sed -n 's/.*"enabled":\([a-z]*\).*/\1/p')
+              if [ "$AUTH_IS" != "$AUTH_WANT" ]; then
+                echo "统一登录状态与部署意图不符：期望 enabled=$AUTH_WANT，实际 '${AUTH_IS:-无}'"
+                echo "（这正是「配了 1 却被当成关闭」那类静默失效的形态，不要放行）"
+                echo "  last: $CFG"
                 docker logs "${CONTAINER_NAME}" --tail 40
                 exit 1
               fi
-              echo "auth ok: enabled + idpAvailable"
-            fi
+              if [ "$AUTH_WANT" != "true" ]; then
+                echo "GET /auth/oidc/config -> $CFG"
+                echo "auth ok: enabled=false（静态门禁路径）"
+                break
+              fi
+              if printf '%s' "$CFG" | grep -q '"idpAvailable":true'; then
+                echo "GET /auth/oidc/config -> $CFG"
+                echo "auth ok: enabled + idpAvailable"
+                break
+              fi
+              c=$((c + 1))
+              if [ "$c" -ge "$MAXC" ]; then
+                echo "统一登录已开启但拉不到认证中心发现文档（容器到 issuer 的网络不通）"
+                echo "  issuer=$(printf '%s' "$CFG" | sed -n 's/.*"issuer":"\([^"]*\)".*/\1/p')"
+                echo "  last: $CFG"
+                docker logs "${CONTAINER_NAME}" --tail 40
+                exit 1
+              fi
+              echo "idpAvailable 还没就绪（第 $c/$MAXC 次），等 10s 再看…"
+              sleep 10
+            done
 
             # 旧镜像层清一清，磁盘紧张（宿机 1.7Gi 内存 / 磁盘也满）
             docker image prune -f > /dev/null || true

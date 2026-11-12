@@ -34,6 +34,10 @@ const { Logger } = require('../lib/logger');
 const { Store } = require('../lib/store');
 const { AuthHub } = require('./auth');
 
+/** 发现文档预热的重试参数（次 / 毫秒）。 */
+const DISCOVERY_WARMUP_MAX_ATTEMPTS = 10;
+const DISCOVERY_WARMUP_RETRY_MS = 15_000;
+
 function createServer(userConfig = {}) {
   const config = {
     host: '0.0.0.0',
@@ -663,6 +667,38 @@ function createServer(userConfig = {}) {
 
   // ────────────────── 生命周期 ──────────────────
 
+  /**
+   * 预热统一登录的发现文档（后台、幂等、带重试）。
+   *
+   * 为什么必须预热：`/auth/oidc/config` 报的 `idpAvailable` 含义是
+   * 「**成功拉到过**发现文档」，而不是「认证中心在线」。
+   * 不预热的话这个字段永远是 false —— 而部署脚本正是拿它断言
+   * 「统一登录确实生效」，于是一个完全正常的部署会被判成失败。
+   *
+   * 为什么带重试：容器可能比认证中心先起来（编排顺序不保证），
+   * 第一次失败就放弃 = 统一登录一直不可用，直到人工重启。
+   *
+   * 失败不固化缓存（AuthHub 只缓存成功的结果），所以重试是有效的。
+   */
+  function warmUpDiscovery() {
+    if (!auth.enabled) return;
+    const attempt = (n) => {
+      auth.discover()
+        .then(() => {
+          logger.info('统一登录发现文档就绪', { issuer: auth.issuer, attempt: n });
+        })
+        .catch((e) => {
+          logger.warn('发现文档拉取失败，稍后重试', { attempt: n, error: e.message });
+          if (n < DISCOVERY_WARMUP_MAX_ATTEMPTS) {
+            const t = setTimeout(() => attempt(n + 1), DISCOVERY_WARMUP_RETRY_MS);
+            // unref：这个定时器不该拖住进程退出（测试里 close() 后要能立刻退干净）
+            if (typeof t.unref === 'function') t.unref();
+          }
+        });
+    };
+    attempt(1);
+  }
+
   function listen() {
     return new Promise((resolve_, reject) => {
       httpServer.once('error', reject);
@@ -676,6 +712,7 @@ function createServer(userConfig = {}) {
           authEnabled: config.authEnabled,
           gateToken: !!config.token,
         });
+        warmUpDiscovery();
         resolve_(actual);
       });
     });
