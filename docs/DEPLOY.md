@@ -137,17 +137,19 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 
 ---
 
-## 已验证（2026-11-12 首次上线）
+## 已验证（2026-11-12）
 
 | 项 | 结果 |
 |---|---|
-| 容器 | `mn_ws_server` up，`0.0.0.0:7777->7777/tcp` |
+| 容器 | `mn_ws_server` up，`0.0.0.0:7777->7777/tcp`，镜像 `mn-ws-server:latest` |
 | `/health` | `{"ok":true,"service":"mn-ws-server","authEnabled":true}` |
-| `/auth/oidc/config` | `enabled=true` + `idpAvailable=true`（认证中心发现文档拉到） |
-| 公网端到端 | 远端 HTTP 客户端 → 公网 server → WS → 本机 nx-kv，**10/10 通过** |
+| `/auth/oidc/config` | `clientId=mn-ws-server` + `loginClientId=mn-ws-client` + `enabled=true` + `idpAvailable=true` |
+| 公网端到端 | 远端 HTTP 客户端 → 公网 server → WS → 本机 nx-kv，**200 pong** |
 | 路由两种写法 | 路径前缀 `/nx-kv/api/ping` 与请求头 `X-Nx-App: nx-kv` + `/api/ping` 结果一致 |
 | L1 拦截 | 无 `X-Mn-Ws-Token` → 401；未知应用 → 404 `unknown_app` |
 | L3 透传 | 业务 action 被 **nx-kv 自己的鉴权**拦下（`未登录或登录已过期`），说明桥没改写凭据 |
+| 面板门禁 | `/` 200、`/api/auth/status` 200（豁免）、`/api/bridge/status` **401 not_logged_in** |
+| 已发布的包 | `npx mn-ws@0.2.1` 实跑：起桥 + 起面板 + 桥接公网 server，全部正常 |
 
 > 「被 nx 自己的鉴权拦下」在这里是**好结果**：它证明请求完整穿过了
 > server → WS → client 半 → nx，而拦它的是 nx 那层（L3），不是桥。
@@ -158,12 +160,17 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 
 - **内存**：宿机 available 常年紧张。容器冷启动可用；若频繁 OOM 重启，
   优先清理 `napcat` 或加 swap，而不是调大 `--memory`。
-- **镜像传输**：每次部署都传一遍 gzip 后的镜像包（~40MB）。走的是
+- **镜像传输**：每次部署都传一遍 gzip 后的镜像包（~59MB）。走的是
   runner → 服务器的跨境 scp，**上传时间与包大小成正比**。
   相比 GHCR pull 的好处是时间可控（不会卡在 registry 同步怪象上）；
   代价是没有镜像缓存层，服务器每次都要重新 load。
   包在服务器上 `docker load` 完立刻 `rm`，不留垃圾。
-- **公网裸奔**：7777 对公网开放，WS 无 TLS。正式使用建议前置 nginx + TLS，
-  或至少确认 `MN_WS_TOKEN` / `MN_WS_JWT_SECRET` 已生效（`/auth/oidc/config` 看 `enabled`）。
-- **认证中心侧的 `mn-ws` client**：统一登录需要在认证中心登记 `client_id=mn-ws`，
-  没登记时 `auth login` 会在换令牌那一步失败（静态门禁路径不受影响）。
+- **公网裸奔**：7777 对公网开放，WS 无 TLS。**这是目前最该修的一条** ——
+  client 半拿 access_token 去 server 半换设备令牌的那一跳是明文，
+  截获就等于账号接管。正式使用建议前置 nginx + TLS。
+- **认证中心侧的 client**：统一登录需要在认证中心登记
+  `client_id=mn-ws-client` 与 `client_id=mn-ws-server`，
+  没登记时 `auth login` 会在 authorize 端点被拒（`invalid client_id`）。
+  ⚠️ **这两个只登记在 DB 里，不是 go-ah 的种子** —— 重建库时不会自动带上，
+  要重新登记（或把它们加进 `auth-hub/internal/db/db.go` 的种子）。
+
