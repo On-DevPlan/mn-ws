@@ -257,12 +257,16 @@ jobs:
 
             # 两端在认证中心的身份也验一下：发错 id 的症状是「登录点开就报
             # invalid client_id」，而那要等用户手动点一次才发现。
-            for pair in "idpClientId:${MN_WS_IDP_CLIENT_ID:-mn-ws-server}" \
+            #
+            # ⚠️ 字段名：server 发布的是 **clientId**（它自己）与
+            # **loginClientId**（client 半的）—— 与 mn-rt 的 clientId 同名同义。
+            for pair in "clientId:${MN_WS_IDP_CLIENT_ID:-mn-ws-server}" \
                         "loginClientId:${MN_WS_LOGIN_CLIENT_ID:-mn-ws-client}"; do
               KEY="${pair%%:*}"; WANT="${pair#*:}"
               GOT=$(printf '%s' "$CFG" | sed -n "s/.*\"$KEY\":\"\([^\"]*\)\".*/\1/p")
               if [ "$GOT" != "$WANT" ]; then
                 echo "ERROR: $KEY 期望 $WANT，实际 '${GOT:-无}'"
+                echo "  last: $CFG"
                 docker logs "${CONTAINER_NAME}" --tail 40
                 exit 1
               fi
