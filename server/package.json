@@ -1,0 +1,62 @@
+{
+  "name": "mn-ws-server",
+  "version": "0.2.0",
+  "description": "mn-ws server 半：公网侧的 HTTP ⇄ WebSocket 桥，把本机 nx 服务桥给远端 HTTP 客户端",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "mn-ws-server": "./bin/mn-ws-server.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js"
+    },
+    "./apps": {
+      "types": "./dist/apps.d.ts",
+      "import": "./dist/apps.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node bin/mn-ws-server.mjs",
+    "dev": "node --import tsx src/cli.ts",
+    "build": "tsc -b tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "~5.9.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/On-DevPlan/mn-ws.git",
+    "directory": "server"
+  },
+  "keywords": [
+    "websocket",
+    "bridge",
+    "proxy",
+    "nx"
+  ]
+}

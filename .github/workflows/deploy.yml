@@ -2,8 +2,7 @@
 #
 # 为什么不用 GHCR：服务器 pull ghcr.io 实测很慢（跨境 + GHCR 同步怪现象），
 # 一次部署的等待时间比传输本身还长。改成**镜像直接传**：
-#   runner 构建 → save 成 tar → gzip（node:22-alpine 基础镜像压得动）
-#   → scp 一个 ~40MB 的包到服务器 → docker load → 重启容器
+#   runner 构建 → save 成 tar → gzip → scp 一个包到服务器 → docker load → 重启容器。
 # 代价是每次部署都要传一遍镜像（~40MB），换来的是**部署时间可控**。
 #
 # 服务器档案 / secrets 配置 / 运维命令：见 docs/DEPLOY.md
@@ -13,7 +12,8 @@
 #   MN_WS_TOKEN —— 静态注册门禁
 #   MN_WS_JWT_SECRET —— 统一登录的 JWT 签名密钥（配了就启用设备令牌）
 #   MN_WS_AUTH_ENABLED —— 显式开/关统一登录（1/true/yes/on 与 0/false/no/off）
-#   MN_WS_ISSUER / MN_WS_IDP_CLIENT_ID —— 认证中心参数
+#   MN_WS_ISSUER —— 认证中心地址
+#   MN_WS_IDP_CLIENT_ID / MN_WS_LOGIN_CLIENT_ID —— 两端在认证中心的身份
 
 name: Deploy
 
@@ -22,17 +22,15 @@ on:
     branches: [ main ]
     paths:
       - 'server/**'
-      - 'lib/**'
       - 'client/**'
-      - 'bin/**'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
       - 'Dockerfile'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
 env:
-  # 不用 ghcr.io 前缀 —— 这个镜像只在这条流水线里流转，不入任何公共仓库
   IMAGE_NAME: mn-ws-server
   CONTAINER_NAME: mn_ws_server
   HOST_PORT: 7777
@@ -48,19 +46,34 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ── 构建 ──────────────────────────────────────────────────────────
-      # load: true 把镜像导回 runner 的本地 docker（不推任何仓库）。
-      # platforms 显式锁 amd64：runner 是 x86_64，服务器也是 x86_64，
-      # 但 buildx 默认按 runner 平台推，显式写死免得哪天换了 arm runner 直接炸。
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
-      - name: Build image (load into runner)
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ⚠️ 构建必须先过：**dist/ 是宿主机构建好的产物**，镜像里直接 COPY 它。
+      #    server 半的构建顺序在 workspace 依赖图里是对的（client 依赖 server，
+      #    pnpm -r 会先构建 server）。
+      - name: Build packages
+        run: pnpm -r --workspace-concurrency=1 build
+
+      - name: Test server package
+        run: pnpm --filter mn-ws-server test
+
+      - name: Build Docker image (load into runner)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64
           load: true
           push: false
           tags: |
@@ -69,9 +82,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ── 打包 ──────────────────────────────────────────────────────────
-      # 两个 tag 一起 save：:latest 给日常用，:${sha} 给回滚用。
-      # gzip 压的是基础镜像层，node:22-alpine 这类底子压得动。
       - name: Save image to gzipped tarball
         run: |
           set -euo pipefail
@@ -107,7 +117,6 @@ jobs:
           echo "MN_WS_IDP_CLIENT_ID (server 半): '${MN_WS_IDP_CLIENT_ID_VAL:-<未配, 回落 mn-ws-server>}'"
           echo "MN_WS_LOGIN_CLIENT_ID (client 半): '${MN_WS_LOGIN_CLIENT_ID_VAL:-<未配, 回落 mn-ws-client>}'"
 
-      # ── 传输 ──────────────────────────────────────────────────────────
       - name: Copy tarball to server
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -117,11 +126,10 @@ jobs:
           port: ${{ secrets.PORT || 22 }}
           source: "${{ env.TAR_NAME }}"
           target: "~/app/"
-          # 大镜像 + 跨境链路：默认 5 分钟必爆，这里给 30 分钟
+          # 大镜像 + 跨境链路：默认 5 分钟必爆，给 30 分钟
           timeout: 30m
           rm: true
 
-      # ── 部署 ──────────────────────────────────────────────────────────
       - name: Load image and restart
         uses: appleboy/ssh-action@v1.0.3
         env:
@@ -152,7 +160,7 @@ jobs:
             ls -lh "$TAR_NAME"
             gunzip -c "$TAR_NAME" | docker load
             rm -f "$TAR_NAME"          # 传完就删，别在磁盘上堆镜像包
-            docker image inspect "$IMAGE" > /dev/null \
+            docker image inspect "${IMAGE}" > /dev/null \
               || { echo "load 后找不到镜像 $IMAGE"; exit 1; }
             echo "image loaded: $IMAGE"
 
@@ -244,6 +252,20 @@ jobs:
               fi
               echo "idpAvailable 还没就绪（第 $c/$MAXC 次），等 10s 再看…"
               sleep 10
+            done
+
+            # 两端在认证中心的身份也验一下：发错 id 的症状是「登录点开就报
+            # invalid client_id」，而那要等用户手动点一次才发现。
+            for pair in "idpClientId:${MN_WS_IDP_CLIENT_ID:-mn-ws-server}" \
+                        "loginClientId:${MN_WS_LOGIN_CLIENT_ID:-mn-ws-client}"; do
+              KEY="${pair%%:*}"; WANT="${pair#*:}"
+              GOT=$(printf '%s' "$CFG" | sed -n "s/.*\"$KEY\":\"\([^\"]*\)\".*/\1/p")
+              if [ "$GOT" != "$WANT" ]; then
+                echo "ERROR: $KEY 期望 $WANT，实际 '${GOT:-无}'"
+                docker logs "${CONTAINER_NAME}" --tail 40
+                exit 1
+              fi
+              echo "  $KEY = $WANT ✓"
             done
 
             # 旧镜像层清一清，磁盘紧张（宿机 1.7Gi 内存 / 磁盘也满）

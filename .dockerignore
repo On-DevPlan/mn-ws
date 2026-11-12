@@ -1,10 +1,13 @@
 node_modules
-npm-debug.log*
+**/node_modules
+**/dist
 .git
 .github
-test
 docs
+test
+tests
+client
 *.md
-!README.md
+!server/README.md
 Dockerfile
 .dockerignore

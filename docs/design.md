@@ -455,6 +455,9 @@ mn-ws 的两端分处公网与内网，吊销诉求本来就不一样。
 | **K26** | **认证中心没登记这个 client** | `auth login` 在 authorize 端点被拒：`400 invalid client_id`。表现为「登录点开就报错」，但本地看不出是「没登记」—— 因为它长得像「redirect_uri 不在白名单」 | 登记走 go-ah 的管理 API `POST /api/admin/clients`（公共客户端 + PKCE + 回环通配）；**注意它不是种子**（`template-web-client`/`oidc-cli`/`fr-app`/`mn-rt` 才是），所以重建库时不会自动带上，要重新登记 |
 | **K27** | **把 `--no-X` 当成取反开关** | `parseArgs` 里写了「`--no-` 前缀 = 取反」的分支 → `--no-open` 被解析成 `open=false`；而读它的地方是 `cfg.noOpen` → **永远是 undefined**。于是 `auth login --no-open` 照样弹浏览器、干等 5 分钟超时 —— 这个开关等于没有，只在「无桌面环境 / SSH 过去登录」这条路上暴露 | `--no-X` 是**一个名叫 noX 的正向开关**（与 mn-rt 的 parseArgs 一致）；`--no-open` 的语义另有第二处坑见 K28 |
 | **K28** | **半途而废的登录把空账号写进配置** | `--no-open` 模式下 `authLogin` 只返回 `{authorizeUrl, pending:true}` —— 没有令牌也没有身份。若调用方不看 `pending` 就继续走保存流程，会存进一条 `deviceToken=undefined` 的账号、**顶替当前账号**，并打印「✓ 登录成功」。之后 client 注册拿空令牌去连被拒，而提示却说「登录成功过」 | 调用方在保存账号**之前**检查 `res.pending` 并如实说「已打印授权地址，未继续登录」；文案也要跟着改对（`--no-open` 不会弹浏览器、也不等回调，文案不能还说「在弹出的浏览器里」「等待授权回调」） |
+| **K29** | **`String(pick(...))` 把 undefined 变成字符串 "undefined"** | `pick` 全空时返回 `undefined`，而 `String(undefined)` 是字符串 **"undefined"** —— 不是空串！于是 `if (!cfg.serverHttp)` 这类判空全部失效（"undefined" 是真值）。**在 server 侧这是安全项**：`token` 变成 "undefined" 后，`config.token && gate === config.token` 等于「任何人都能用 `X-Mn-Ws-Token: undefined` 通过门禁」 | 缺省必须是空串：统一走 `str()` 辅助函数（`v == null ? '' : String(v)`），不要直接 `String(pick(...))`。这个坑由 client 侧的单测抓出来 —— 表现是「配置里写着 undefined、clientId 永远生成不出来、配置文件从不落盘」 |
+| **K30** | **keep-alive 连接让 `httpServer.close()` 永不返回** | Node 19+ 的全局 agent 默认 keepAlive，而 `httpServer.close()` 会**等这些空闲连接自己结束**才回调 → shutdown 永远不返回。生产上表现为 SIGTERM 后容器不退出，只能等编排强杀；测试里表现为「整套测试挂死」 | close 时显式 `httpServer.closeAllConnections()`（pending 请求已经回了 503，断连接是安全的） |
+| **K31** | **块注释里出现 `*/` 提前闭合注释** | 端口通配的形态是「星号紧跟斜杠」，写在**块注释里**会把注释提前闭合 —— 文件后半截被当成代码，报一堆莫名其妙的语法错（TS1434/TS1443…），而报错位置离真正的祸首十万八千里 | 注释里不写字面量，改写成「任意端口」；mn-rt 的代码里同样踩过这个坑并留了警告 |
 
 ---
 

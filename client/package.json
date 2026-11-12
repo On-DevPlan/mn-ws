@@ -1,0 +1,57 @@
+{
+  "name": "mn-ws",
+  "version": "0.2.0",
+  "description": "HTTP 与 WebSocket 双向桥的客户端半：把本机 nx 服务桥给远端 HTTP 客户端",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "mn-ws": "./bin/ws.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "assets"
+  ],
+  "scripts": {
+    "start": "pnpm build && node bin/ws.mjs serve",
+    "dev": "node --import tsx scripts/dev.mjs",
+    "dev:serve": "node --import tsx src/runtime/cli.ts serve --no-open",
+    "link:local": "node scripts/link-local.mjs",
+    "unlink:local": "node scripts/link-local.mjs --unlink",
+    "build": "tsc -b tsconfig.node.json && vite build",
+    "typecheck": "tsc -b tsconfig.node.json tsconfig.web.json",
+    "lint": "eslint .",
+    "test:smoke": "node tests/smoke.mjs",
+    "test:unit": "node --import tsx --test \"tests/unit/*.test.ts\" \"tests/unit/*.test.mjs\"",
+    "test:e2e": "node tests/e2e-remote.js",
+    "test": "pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test:smoke && pnpm run test:unit"
+  },
+  "dependencies": {
+    "mn-ws-server": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.0",
+    "eslint": "^10.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "~5.9.0",
+    "typescript-eslint": "^8.71.0",
+    "vite": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

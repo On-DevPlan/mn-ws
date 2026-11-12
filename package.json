@@ -1,55 +1,31 @@
 {
-  "name": "mn-ws",
-  "version": "0.1.0",
-  "description": "mn-ws —— HTTP ⇄ WebSocket 双向桥：把本机 nx 系列服务经一条 WebSocket 暴露给 HTTP 客户端",
-  "bin": {
-    "mn-ws": "./bin/index.js"
+  "name": "mn-ws-monorepo",
+  "private": true,
+  "type": "module",
+  "description": "mn-ws —— HTTP ⇄ WebSocket 双向桥（monorepo：client 半 + server 半）",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "build": "pnpm -r --workspace-concurrency=1 build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "dev": "pnpm --filter mn-ws dev",
+    "dev:serve": "pnpm --filter mn-ws dev:serve"
   },
-  "main": "lib/index.js",
-  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/On-DevPlan/mn-ws.git"
-  },
-  "homepage": "https://github.com/On-DevPlan/mn-ws#readme",
-  "bugs": {
-    "url": "https://github.com/On-DevPlan/mn-ws/issues"
-  },
-  "files": [
-    "bin/",
-    "lib/",
-    "server/",
-    "client/",
-    "README.md"
-  ],
-  "scripts": {
-    "start": "node bin/index.js client",
-    "server": "node bin/index.js server",
-    "test": "node test/unit.js",
-    "test:smoke": "node test/smoke-cli.js",
-    "test:e2e": "node test/e2e-remote.js"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "os": [
-    "win32",
-    "darwin",
-    "linux"
-  ],
-  "cpu": [
-    "x64",
-    "arm64"
-  ],
-  "keywords": [
-    "websocket",
-    "bridge",
-    "http",
-    "proxy",
-    "nx"
-  ],
-  "license": "MIT"
+  }
 }

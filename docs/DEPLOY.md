@@ -1,12 +1,17 @@
-# mn-ws server 半 部署手册
+# mn-ws-server 部署手册
 
-GitHub Actions 自动部署（`.github/workflows/deploy.yml`）：runner build 镜像 →
-`docker save` → gzip → scp → 服务器 `docker load` → 重启容器 → `/health` 健康检查 →
-断言统一登录开关与部署意图一致。
+GitHub Actions 自动部署（`.github/workflows/deploy.yml`）：
+装依赖 → `pnpm -r build`（两个包）→ `docker build` → `docker save` → gzip →
+scp → 服务器 `docker load` → 重启容器 → `/health` 健康检查 →
+断言统一登录开关与部署意图一致 + 两端 client_id 正确。
 
 **镜像不走 GHCR**：服务器 pull ghcr.io 实测很慢（跨境 + GHCR 同步怪现象），
 一次部署的等待时间比传输本身还长。改成镜像直接传 —— 代价是每次部署都传一遍
 （gzip 后 ~40MB），换来的是**部署时间可控**。
+
+> ⚠️ 镜像里的 `dist/` 是**宿主机构建好的产物**（CI 先跑 `pnpm -r build`）。
+> server 半是 monorepo 的一个 workspace，单独在镜像里装依赖会拖进整个
+> workspace（client 的 react 等），所以构建与依赖安装分开。
 
 ---
 
@@ -51,9 +56,11 @@ gh secret set MN_WS_LOGIN_CLIENT_ID -b "mn-ws-client"   # client 半的身份
 > authorize 端点被拒（`invalid client_id`）。
 > 登记走 go-ah 的管理 API（`POST /api/admin/clients`，管理员会话），
 > 形状与 `mn-rt` 一致：公共客户端 + PKCE + 回环通配回调。
-> 只登记 DB 的话，**重建库时不会自动带上** —— 与 go-ah 种子里的
+> ⚠️ **只登记 DB 的话，重建库时不会自动带上** —— 与 go-ah 种子里的
 > `template-web-client` / `oidc-cli` / `fr-app` / `mn-rt` 不同，
 > 那几个是写死在 `auth-hub/internal/db/db.go` 的种子里的。
+> 要长期可靠就把这两个也加进种子。
+
 
 
 > **Windows 上用 PowerShell 设多行 secret（私钥）必须避开管道**：
@@ -103,7 +110,8 @@ gh secret set MN_WS_LOGIN_CLIENT_ID -b "mn-ws-client"   # client 半的身份
 
 ## 触发与回滚
 
-- **自动**：push 到 `main` 且改动 `server/**`、`lib/**`、`client/**`、`bin/**`、`package*.json`、`Dockerfile` 或 workflow 本身
+- **自动**：push 到 `main` 且改动 `server/**`、`client/**`、`package.json`、
+  `pnpm-workspace.yaml`、`pnpm-lock.yaml`、`Dockerfile` 或 workflow 本身
 - **手动**：Actions → Deploy → Run workflow（选分支/commit 即可回滚旧 SHA）
 - **服务器上手动**：`docker logs -f mn_ws_server`、`docker ps`
 
@@ -114,13 +122,16 @@ gh secret set MN_WS_LOGIN_CLIENT_ID -b "mn-ws-client"   # client 半的身份
 发版走**附注 tag**，与 deploy.yml 无关：
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` 会：校验 tag 与 `package.json` 版本一致 → 跑测试 →
-`npm publish` → 建 GitHub Release。
+`.github/workflows/release.yml` 会：校验 tag 与两个包的版本一致 → 装依赖 → 构建 →
+跑测试 → **先发 `mn-ws-server` 再发 `mn-ws`** → 建 GitHub Release。
 
-> **tag 必须与 package.json 版本一致**，否则流水线当场失败。
+> **发布顺序不能反**：client 包的依赖里有 `mn-ws-server`，
+> 先发 client 会装到一个还不存在的版本。
+
+> **tag 必须与版本一致**，否则流水线当场失败。
 > npm 上同一个版本号永远只能发一次，重发报 `E403 cannot publish over` ——
 > 版本号跳了只能跳着补。
 
