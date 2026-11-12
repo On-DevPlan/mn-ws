@@ -84,6 +84,19 @@ interface PeerMeta {
   registered: boolean;
   connectedAt: string;
   ip: string | undefined;
+  /** 这条连接是不是静态门禁（门禁能看全部桥、具名用户只能看自己的）。 */
+  isGate: boolean;
+  /**
+   * 这条连接**注册过的** app 表（不限于它当前持有的）。
+   *
+   * 记它是为了「顶替后归还」：同一个 app 被新桥顶替时，旧桥那条记录会从
+   * bridges 里删掉，但**旧桥仍然连着**。新桥一旦先断开，服务端若只是把 app
+   * 摘干净，这个 app 就成了「没人能路由」——旧桥明明活着却再也接不到请求。
+   * （实测踩过：用静态门禁的桥连上来顶掉用户桥，门禁桥一断，用户桥的 app
+   *  全部变成 502。）
+   * 有这份记录，才能在顶替者断开时把 app 还给还活着的旧桥。
+   */
+  appList: AppDescriptor[];
 }
 
 /** 调用方身份。 */
@@ -410,6 +423,8 @@ export function createServer(userConfig: ServerOptions = {}) {
       registered: false,
       connectedAt: new Date().toISOString(),
       ip: req.socket.remoteAddress,
+      isGate: false,
+      appList: [],
     });
     stats.connections += 1;
     logger.info('peer connected', { peerId, ip: req.socket.remoteAddress });
@@ -505,6 +520,8 @@ export function createServer(userConfig: ServerOptions = {}) {
       for (const [app, b] of [...bridges.entries()]) {
         if (b.ws === ws) bridges.delete(app);
       }
+      // 顶替者断开后把它顶走的 app 还给仍连着的旧桥（否则 app 会永久空档）
+      restoreReplacedApps(ws, meta);
       // 该桥上还没回的请求全部失败
       for (const [id, p] of [...pending.entries()]) {
         if (p.bridgeId !== meta.bridgeId) continue;
@@ -521,6 +538,40 @@ export function createServer(userConfig: ServerOptions = {}) {
       logger.warn('peer socket 错误', { peerId, error: e && e.message });
     });
   });
+
+  /**
+   * 把被顶替走的 app 归还给**仍然连着**的旧桥。
+   *
+   * 顶替是「一个 app 同时只有一个桥」的取舍（同一台机器跑两份 nx 是异常状态，
+   * 顶替比随机命中更可预期），但顶替者一旦先断开，app 就会空档：
+   * 旧桥明明活着却接不到请求，调用方拿到的是 502「注册过但桥掉线了」。
+   *
+   * 这里按每条连接自己报过的 app 表（meta.appList）把路由还回去：
+   * 只还「现在没有主人」的 app，已有主人的不动（后来者仍然优先）。
+   */
+  function restoreReplacedApps(deadWs: WebSocket, deadMeta: PeerMeta): void {
+    for (const appMeta of deadMeta.appList) {
+      const app = appMeta.app;
+      if (bridges.has(app)) continue; // 现在有主了 —— 后来者仍然优先
+      for (const [ws, p] of peers) {
+        if (ws === deadWs) continue;
+        const own = p.appList.find((a) => a.app === app);
+        if (!own) continue;
+        bridges.set(app, {
+          ws,
+          bridgeId: p.bridgeId ?? '',
+          userId: p.userId ?? '',
+          isGate: p.isGate,
+          apps: p.appList,
+          meta: own,
+          connectedAt: p.connectedAt,
+          ip: p.ip,
+        });
+        logger.info('顶替者断开，app 归还给仍在连接的桥', { app, peerId: p.peerId });
+        break;
+      }
+    }
+  }
 
   /**
    * 处理 client half 的注册帧。
@@ -589,6 +640,8 @@ export function createServer(userConfig: ServerOptions = {}) {
     meta.registered = true;
     meta.bridgeId = String(msg.bridgeId || meta.peerId);
     meta.userId = userId;
+    meta.isGate = isGate;
+    meta.appList = clean;
 
     logger.info('bridge registered', {
       peerId: meta.peerId, bridgeId: meta.bridgeId, userId, apps: clean.map((a) => a.app),

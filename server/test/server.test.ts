@@ -296,3 +296,60 @@ test('属主隔离：别人的桥访问不到', async () => {
   bridge.close();
   await server.close();
 });
+
+/** 轮询等待某个条件成立（WS 的 close 是异步到达服务端的，不能假设立刻生效）。 */
+async function waitUntil(fn: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await fn()) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error('等待超时');
+}
+
+test('顶替者断开后 app 归还给仍连着的旧桥（不再变成没人能路由）', async () => {
+  const nx = await startFakeNx();
+  const server = createServer({ host: '127.0.0.1', port: 0, token: 'gate-token', dataDir: null, logLevel: 'error' });
+  const port = await server.listen();
+  // try/finally：断言失败时也要把 server 关掉 —— 否则失败会变成「进程不退出」，
+  // 把一条清晰的断言失败变成一条看不懂的超时。
+  let oldBridge: FakeBridge | null = null;
+  let newBridge: FakeBridge | null = null;
+  try {
+    // 旧桥先连上，注册 my-api
+    oldBridge = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [
+      { app: 'my-api', base: `http://127.0.0.1:${nx.port}` },
+    ]);
+    await oldBridge.registered;
+
+    // 新桥连上来，把同一个 app 顶替掉（顶替是有意的：一个 app 同时只有一个桥）
+    newBridge = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [
+      { app: 'my-api', base: `http://127.0.0.1:${nx.port}` },
+    ]);
+    await newBridge.registered;
+
+    // 顶替者断开。旧桥**还连着** —— app 必须回到旧桥手上，
+    // 否则这个 app 就成了「注册过但没人能路由」，调用方永远拿到 502。
+    newBridge.close();
+    newBridge = null;
+    await waitUntil(async () => {
+      const cat = await httpGet(`http://127.0.0.1:${port}/api/catalog`, { 'x-mn-ws-token': 'gate-token' });
+      return JSON.parse(cat.body).count === 1;
+    });
+
+    const cat = await httpGet(`http://127.0.0.1:${port}/api/catalog`, { 'x-mn-ws-token': 'gate-token' });
+    assert.equal(JSON.parse(cat.body).count, 1, '顶替者断开后 app 应回到旧桥，目录里应仍有 1 个应用');
+
+    const res = await httpGet(`http://127.0.0.1:${port}/api/ping`, {
+      'x-mn-ws-token': 'gate-token',
+      'x-nx-app': 'my-api',
+    });
+    assert.equal(res.status, 200, res.body);
+    assert.equal(JSON.parse(res.body).url, '/api/ping');
+  } finally {
+    newBridge?.close();
+    oldBridge?.close();
+    await server.close();
+    await nx.close();
+  }
+});
