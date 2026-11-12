@@ -296,7 +296,8 @@ export function loadClientConfig(flags: Record<string, unknown> = {}): ClientCon
 
   // --apps 既可以只给名字，也可以带上基址（a=http://127.0.0.1:9999）
   const parsedApps = parseApps(pick(flags.apps, env.MN_WS_APPS, file.apps, ''));
-  const parsedMap = parseAppMap(pick(flags.appMap, env.MN_WS_APP_MAP, file.appOverrides, ''));
+  // 配置文件里这个字段叫 `appMap`（`appOverrides` 是同义的别名，两种都认）
+  const parsedMap = parseAppMap(pick(flags.appMap, env.MN_WS_APP_MAP, file.appMap, file.appOverrides, ''));
 
   const cfg: ClientConfig = {
     url: str(pick(flags.url, env.MN_WS_URL, file.url, 'ws://1.94.101.189:7777/ws')),
@@ -545,11 +546,18 @@ export function saveCustomApps(list: CustomApp[]): { changed: boolean; file: str
   const next: Record<string, unknown> = { ...existing, customApps: clean };
 
   // 自定义应用的名字并进白名单（去重、保序）
-  const names = parseApps(existing.apps).names;
+  //
+  // ⚠️ 白名单里可能带**内联基址**（"名字=基址"），那必须**原样保留**：
+  //    只把名字留下来，基址就没了 —— 下一次启动那些应用会被跳过，
+  //    症状是「刚配好能用，重启后桥上就没它们了」。
+  const rawApps = Array.isArray(existing.apps) ? existing.apps.map((x) => String(x)) : [];
+  const names = parseApps(rawApps).names;
   for (const a of clean) {
-    if (!names.includes(a.name)) names.push(a.name);
+    if (names.includes(a.name)) continue;
+    names.push(a.name);
+    rawApps.push(a.name);
   }
-  next.apps = names;
+  next.apps = rawApps;
 
   const changed = JSON.stringify(existing) !== JSON.stringify(next);
   if (changed) writeConfigFile(next);

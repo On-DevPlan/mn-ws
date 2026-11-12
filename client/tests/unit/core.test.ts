@@ -15,6 +15,7 @@ import {
   loadClientConfig, parseApps, parseAppMap, httpBaseFromWs,
   withAccounts, listAccounts, saveAuthAccount, switchActiveAccount,
   clearAuthCredentials, entryKeyOf, labelOf, isExpired, pick, isEnvTruthy,
+  saveCustomApps,
 } from '../../src/core/config.js';
 import { createAuthRequest, buildAuthorizeUrl, loginClientIdOf, b64url } from '../../src/core/auth.js';
 import { MnWsController } from '../../src/core/controller.js';
@@ -189,6 +190,44 @@ test('白名单：没登记基址 → 记下来，不静默忽略', () => {
     const { apps, missing } = c.resolveApps();
     assert.deepEqual(Object.keys(apps), []);
     assert.deepEqual(missing, ['my-api']);
+  });
+});
+
+test('白名单：配置文件里的 appMap 要被读出来（配过就该一直在）', () => {
+  withTempHome(() => {
+    // 踩过的坑：配置里的键叫 `appMap`，读成 `appOverrides` 就读不到 ——
+    // 症状是「mn-ws apps set 配好了，重启后桥上就没那个应用了」。
+    const f = path.join(process.env.MN_WS_HOME!, 'config.json');
+    fs.writeFileSync(f, JSON.stringify({
+      apps: ['my-api'],
+      appMap: { 'my-api': { base: 'http://127.0.0.1:7877' } },
+    }), 'utf8');
+
+    const c = new MnWsController(loadClientConfig({}));
+    const { apps, missing } = c.resolveApps();
+    assert.equal(apps['my-api'], 'http://127.0.0.1:7877');
+    assert.deepEqual(missing, []);
+  });
+});
+
+test('动态注册：白名单里的内联基址要原样保留', () => {
+  withTempHome(() => {
+    const f = path.join(process.env.MN_WS_HOME!, 'config.json');
+    fs.writeFileSync(f, JSON.stringify({
+      apps: ['my-api=http://127.0.0.1:7877'],
+    }), 'utf8');
+
+    // 加一个自定义应用会把白名单重写一遍 —— 内联基址不能被截成只剩名字
+    saveCustomApps([{ name: 'other-api', base: 'http://127.0.0.1:9999' }]);
+
+    const raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+    assert.deepEqual(raw.apps, ['my-api=http://127.0.0.1:7877', 'other-api']);
+
+    const c = new MnWsController(loadClientConfig({}));
+    const { apps, missing } = c.resolveApps();
+    assert.equal(apps['my-api'], 'http://127.0.0.1:7877');
+    assert.equal(apps['other-api'], 'http://127.0.0.1:9999');
+    assert.deepEqual(missing, []);
   });
 });
 
