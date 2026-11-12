@@ -1,13 +1,16 @@
 node_modules
 **/node_modules
-**/dist
+client
 .git
 .github
 docs
 test
 tests
-client
 *.md
 !server/README.md
 Dockerfile
 .dockerignore
+
+# ⚠️ **不要排除 server/dist** —— 镜像里装的就是它（宿主机构建好的产物）。
+#    只排除 client/dist（面板产物，镜像里用不到）。
+client/dist
