@@ -458,6 +458,8 @@ mn-ws 的两端分处公网与内网，吊销诉求本来就不一样。
 | **K29** | **`String(pick(...))` 把 undefined 变成字符串 "undefined"** | `pick` 全空时返回 `undefined`，而 `String(undefined)` 是字符串 **"undefined"** —— 不是空串！于是 `if (!cfg.serverHttp)` 这类判空全部失效（"undefined" 是真值）。**在 server 侧这是安全项**：`token` 变成 "undefined" 后，`config.token && gate === config.token` 等于「任何人都能用 `X-Mn-Ws-Token: undefined` 通过门禁」 | 缺省必须是空串：统一走 `str()` 辅助函数（`v == null ? '' : String(v)`），不要直接 `String(pick(...))`。这个坑由 client 侧的单测抓出来 —— 表现是「配置里写着 undefined、clientId 永远生成不出来、配置文件从不落盘」 |
 | **K30** | **keep-alive 连接让 `httpServer.close()` 永不返回** | Node 19+ 的全局 agent 默认 keepAlive，而 `httpServer.close()` 会**等这些空闲连接自己结束**才回调 → shutdown 永远不返回。生产上表现为 SIGTERM 后容器不退出，只能等编排强杀；测试里表现为「整套测试挂死」 | close 时显式 `httpServer.closeAllConnections()`（pending 请求已经回了 503，断连接是安全的） |
 | **K31** | **块注释里出现 `*/` 提前闭合注释** | 端口通配的形态是「星号紧跟斜杠」，写在**块注释里**会把注释提前闭合 —— 文件后半截被当成代码，报一堆莫名其妙的语法错（TS1434/TS1443…），而报错位置离真正的祸首十万八千里 | 注释里不写字面量，改写成「任意端口」；mn-rt 的代码里同样踩过这个坑并留了警告 |
+| **K32** | **「是不是自定义」与「标题是什么」共用一个 Map** | `resolveApps` 里用一个 Map 同时记「这是自定义应用」和「它的标题」。于是**没填标题的自定义应用查不到 → 被当成「不在表里」→ 基址算不出来 → 整个应用被丢掉**。症状是「界面上明明加了，桥过去却 404 unknown_app」 | 拆成两个结构：`Set` 记「是不是自定义」、`Map` 记「标题」。凡是一个 Map 同时承担两种语义，都要停下来想想 |
+| **K33** | **server 半不替 client 半猜标题** | 动态注册的应用不在已知表里，标题只有 client 半知道（用户自己起的名）。server 若按自己的表回落，远端目录里显示的就是裸的应用名 | `describeApp(app, base, title?)` 接受客户端自报的标题：给了就用它的，不给才回落已知表。注册帧的 `apps[]` 带上 `title` |
 
 ---
 

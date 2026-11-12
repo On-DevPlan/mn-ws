@@ -80,6 +80,8 @@ pnpm --filter mn-ws dev  # vite + 后端 tsx 直跑源码
 | `mn-ws status` | 桥接状态：连没连、注册了哪些 app、当前凭据是谁 |
 | `mn-ws apps` | 列出可桥接的应用（白名单 + 本地端口存活探测） |
 | `mn-ws apps set --apps nx-kv,nx-rh` | 设置白名单（不给就一个都不桥） |
+| `mn-ws apps add <名字> --port N` | **动态注册**一个不在已知表里的本机服务 |
+| `mn-ws apps remove <名字>` | 移除一个动态注册的应用 |
 | `mn-ws apps known` | 列出已知的 nx 服务与默认端口 |
 | `mn-ws catalog` | 拉远端 server 半的元信息目录 |
 | `mn-ws bridge start` / `bridge stop` | 启停桥 |
@@ -189,6 +191,33 @@ curl -H 'X-Mn-Ws-Token: $TOKEN' -H 'X-Nx-App: nx-kv' \
 **白名单说了算**：只有 `--apps` / `--ports` / `--app-map` 里列出的应用才会被桥。
 端口探测（`mn-ws apps`）**只用来显示状态，不会自动开桥** —— 扫到端口在监听就自动开桥，
 等于把整台机器暴露出去。
+
+### 运行时动态注册端口
+
+已知表（`KNOWN_APPS`）只覆盖 nx 系列。**你自己起的服务同样能被桥出去** ——
+在面板的「动态注册」里给它起个**路由标识**和端口就行：
+
+```
+路由标识   my-api          ← 小写字母开头，只含小写字母/数字/连字符（它要当路由标识用）
+端口       9999            ← 或填完整基址
+显示名     我的服务         ← 可选，远端目录里给人看
+```
+
+链路是这样走的：
+
+1. 落盘到 `~/.mn-ws/config.json` 的 `customApps`，同时进白名单
+2. 桥重注册时把整张 app 表（**连标题一起**）报给 server 半
+3. server 半汇总进**元信息目录**
+4. 远端客户端拉目录 → 看到「有哪些端口、叫什么」→ 用
+   `X-Nx-App: my-api` 或路径前缀 `/my-api/...` 打过来
+5. 之后就是原来的 http/ws 转换逻辑，一行没改
+
+CLI 等价：
+
+```bash
+mn-ws apps add my-api --port 9999 --title '我的服务'
+mn-ws apps remove my-api
+```
 
 已知 nx 服务与默认端口（2026-11-12 实测各仓 `core/paths.js`）：
 
