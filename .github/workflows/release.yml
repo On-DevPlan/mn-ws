@@ -85,17 +85,26 @@ jobs:
           pnpm --filter mn-ws test:unit
 
       # ── 发 server 半（先）────────────────────────────────────────────
+      #
+      # ⚠️ 为什么是 `pnpm pack` + `npm publish <tarball>` 而不是 `npm publish`：
+      #   client 包的依赖里有 `workspace:*`（workspace 协议）。**npm publish 不认识
+      #   这个协议** —— 原样发出去的话，安装方直接报
+      #   `Unsupported URL Type "workspace:"`，包等于废掉。
+      #   pnpm pack 会把它重写成具体版本（workspace:* → 0.2.0），
+      #   而 npm publish <tarball> 保留 provenance 签名（pnpm publish 没有这个 flag）。
       - name: 发布 mn-ws-server
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           cd server
-          if npm view "mn-ws-server@$(node -p "require('./package.json').version")" version >/dev/null 2>&1; then
-            echo "mn-ws-server@$(node -p "require('./package.json').version") 已在 npm 上，跳过"
+          VER=$(node -p "require('./package.json').version")
+          if npm view "mn-ws-server@$VER" version >/dev/null 2>&1; then
+            echo "mn-ws-server@$VER 已在 npm 上，跳过"
             exit 0
           fi
-          npm publish --provenance --access public
+          pnpm pack --pack-destination .pack
+          npm publish ".pack/mn-ws-server-$VER.tgz" --provenance --access public
 
       # ── 再发 client 半（依赖刚发出去的 server 半）──────────────────────
       - name: 发布 mn-ws
@@ -104,11 +113,13 @@ jobs:
         run: |
           set -euo pipefail
           cd client
-          if npm view "mn-ws@$(node -p "require('./package.json').version")" version >/dev/null 2>&1; then
-            echo "mn-ws@$(node -p "require('./package.json').version") 已在 npm 上，跳过"
+          VER=$(node -p "require('./package.json').version")
+          if npm view "mn-ws@$VER" version >/dev/null 2>&1; then
+            echo "mn-ws@$VER 已在 npm 上，跳过"
             exit 0
           fi
-          npm publish --provenance --access public
+          pnpm pack --pack-destination .pack
+          npm publish ".pack/mn-ws-$VER.tgz" --provenance --access public
 
       - name: 建 GitHub Release
         if: github.ref_type == 'tag'
