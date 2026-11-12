@@ -106,7 +106,30 @@ jobs:
           pnpm pack --pack-destination .pack
           npm publish ".pack/mn-ws-server-$VER.tgz" --provenance --access public
 
-      # ── 再发 client 半（依赖刚发出去的 server 半）──────────────────────
+      # ── 等 server 半真的可解析，再发 client 半 ──────────────────────
+      #
+      # ⚠️ npm 是**分阶段发布**的：publish 只是把版本提交上去，
+      #    真正可安装还要等平台提升（实测 1-3 分钟，有时更久）。
+      #    client 半的依赖是 mn-ws-server@<同版本> —— server 半没被提升之前，
+      #    装 mn-ws 直接报 "No matching version found for mn-ws-server@x.y.z"。
+      #    所以必须**等它可解析**，而不是「publish 完就接着发下一个」。
+      - name: 等 mn-ws-server 可解析
+        run: |
+          set -euo pipefail
+          cd server
+          VER=$(node -p "require('./package.json').version")
+          for i in $(seq 1 90); do
+            if npm view "mn-ws-server@$VER" version >/dev/null 2>&1; then
+              echo "mn-ws-server@$VER 已可解析（第 $i 次探测）"
+              exit 0
+            fi
+            echo "  等待 mn-ws-server@$VER 被提升…（第 $i 次，每次 20s）"
+            sleep 20
+          done
+          echo "::error::mn-ws-server@$VER 30 分钟内没被提升 —— 停在这里，别发 client（装了也装不上）"
+          exit 1
+
+      # ── 再发 client 半（依赖刚被提升的 server 半）──────────────────────
       - name: 发布 mn-ws
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
