@@ -55,6 +55,14 @@ export interface ServerOptions {
   jwtSecret?: string;
   authEnabled?: boolean;
   insecure?: boolean;
+  /**
+   * 心跳间隔（毫秒）。默认 15 秒。
+   *
+   * 做成可配置只有一个理由：**测试要能跑得快**。心跳的回归测试要等好几轮
+   * 才能确认「连接没被误杀」，用默认值就得等 30 秒以上；测试里传 100ms，
+   * 同样能覆盖「连续多轮心跳后连接仍然活着」这个断言。
+   */
+  heartbeatIntervalMs?: number;
   requestTimeoutMs?: number;
   dataDir?: string | null;
   logLevel?: string;
@@ -126,6 +134,7 @@ export function createServer(userConfig: ServerOptions = {}) {
     authEnabled: false,
     insecure: false,
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
     dataDir: null as string | null,
     logLevel: 'info',
     ...userConfig,
@@ -509,7 +518,7 @@ export function createServer(userConfig: ServerOptions = {}) {
       meta.isAlive = false;
       try { ws.ping(); } catch { /* ignore */ }
     }
-  }, HEARTBEAT_INTERVAL_MS);
+  }, config.heartbeatIntervalMs);
   heartbeat.unref?.();
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
@@ -535,6 +544,12 @@ export function createServer(userConfig: ServerOptions = {}) {
       wsPath: config.wsPath,
       protocol: 1,
     });
+
+    // 心跳的「活」标记。**这两行不能少** —— 少了它，心跳每轮都会把连接判死：
+    // 没人把 isAlive 复位成 true，下一轮就 terminate（实测表现为桥每 30 秒
+    // 被踢一次、重连、再被踢）。收到 pong 才算这一轮还活着。
+    (ws as unknown as { isAlive: boolean }).isAlive = true;
+    ws.on('pong', () => { (ws as unknown as { isAlive: boolean }).isAlive = true; });
 
     ws.on('message', (raw: unknown) => {
       const msg = decodeFrame(raw);

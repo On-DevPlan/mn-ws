@@ -445,6 +445,36 @@ async function waitUntil(fn: () => boolean | Promise<boolean>, timeoutMs = 3000)
   throw new Error('等待超时');
 }
 
+test('心跳：正常连接扛过多轮心跳，不被误杀', async () => {
+  // 这条测试防的是「服务端把 isAlive 复位那两行弄丢」这种错：
+  // 症状是桥每 30 秒被踢一次、重连、再被踢 —— 线上表现为「刚连上就断」，
+  // 而所有别的测试都会绿（连接死之前它们早就跑完了）。
+  //
+  // 所以这里把心跳调快（60ms），让连接连过 5 轮心跳再断言它还活着。
+  const nx = await startFakeNx();
+  const server = createServer({
+    host: '127.0.0.1', port: 0, token: 'gate-token',
+    heartbeatIntervalMs: 60,
+    dataDir: null, logLevel: 'error',
+  });
+  const port = await server.listen();
+  const bridge = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [
+    { app: 'my-api', base: `http://127.0.0.1:${nx.port}` },
+  ]);
+  await bridge.registered;
+
+  try {
+    // 连过 5 轮心跳
+    await new Promise((r) => setTimeout(r, 320));
+    const res = await httpGet(`http://127.0.0.1:${port}/my-api/api/ping`, { 'x-mn-ws-token': 'gate-token' });
+    assert.equal(res.status, 200, `过了多轮心跳后连接应该还活着：${res.body}`);
+  } finally {
+    bridge.close();
+    await server.close();
+    await nx.close();
+  }
+});
+
 test('顶替者断开后 app 归还给仍连着的旧桥（不再变成没人能路由）', async () => {
   const nx = await startFakeNx();
   const server = createServer({ host: '127.0.0.1', port: 0, token: 'gate-token', dataDir: null, logLevel: 'error' });

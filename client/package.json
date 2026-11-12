@@ -30,7 +30,7 @@
     "lint": "eslint .",
     "test:smoke": "node tests/smoke.mjs",
     "test:unit": "node --import tsx --test \"tests/unit/*.test.ts\" \"tests/unit/*.test.mjs\"",
-    "test:e2e": "node tests/e2e-remote.js",
+    "test:e2e": "node tests/e2e-remote.cjs",
     "test": "pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test:smoke && pnpm run test:unit"
   },
   "dependencies": {

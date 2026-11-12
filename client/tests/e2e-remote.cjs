@@ -4,7 +4,7 @@
  * 远端验收：站在「远端 HTTP 客户端」的角度，走**已部署**的 mn-ws server
  * 打本机被桥接的应用。
  *
- * 与 test/unit.js 的区别：unit.js 在进程内把 server 和 client 都拉起来；
+ * 与单测的区别：单测在进程内把 server 和 client 都拉起来；
  * 这里打的是**公网上那台 server 半**（真实网络、真实容器、真实 WS 握手），
  * 验的是「部署完了到底能不能用」。
  *
@@ -12,9 +12,14 @@
  *   set MN_WS_E2E_URL=http://1.94.101.189:7777
  *   set MN_WS_E2E_TOKEN=<门禁 token>
  *   set MN_WS_E2E_APP=my-api            # 被桥的应用，默认 my-api
- *   node test/e2e-remote.js
+ *   node tests/e2e-remote.cjs
  *
  * 令牌从环境变量读，**不进命令行** —— 命令行会进 shell 历史。
+ *
+ * ⚠️ 必须是 .cjs：client 包的 package.json 写着 "type": "module"，
+ *    .js 会被当 ESM 加载，而这个脚本是 CommonJS（require）。
+ *    （写成 .js 时 `pnpm test:e2e` 直接报 "require is not defined"——
+ *      这个错一直藏着，因为没人真跑过它。）
  */
 
 const http = require('node:http');
