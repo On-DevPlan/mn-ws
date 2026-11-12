@@ -8,10 +8,18 @@ import {
   MAX_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT_MS,
   type Frame,
 } from './protocol.js';
-import { resolveApp, describeApp, type AppDescriptor } from './apps.js';
+import { resolveApp, describeApp, APP_HEADER, type AppDescriptor } from './apps.js';
 import { Logger } from './logger.js';
 import { Store } from './store.js';
 import { AuthHub } from './auth.js';
+
+/**
+ * 心跳间隔（毫秒）：每轮 ping 一次所有连接。
+ *
+ * 取 15s 的理由：既要快到「服务端发现死桥」不至于让路由表长期挂着僵尸，
+ * 又要慢到不打扰正常链路（一条空闲的桥每 15s 一个 ping，开销可以忽略）。
+ */
+const HEARTBEAT_INTERVAL_MS = 15_000;
 
 /**
  * mn-ws server —— 公网侧的 HTTP ⇄ WebSocket 桥。
@@ -206,6 +214,74 @@ export function createServer(userConfig: ServerOptions = {}) {
         return;
       }
 
+      // ── 授权码 → 本服务的令牌（业务令牌端点）───────────────────────────
+      //
+      // 与 mn-rt 的 /auth/oidc/callback 同构，这是「统一登录 → 业务令牌」
+      // 这套架构在本服务里的落点：
+      //   客户端（手机 / 面板）拿**登录态**去认证中心铸一枚授权码，
+      //   把 code + PKCE verifier 交到这里 —— **服务端**拿 client 半的身份
+      //   去认证中心换码，再签一枚**本服务自己的**令牌回去。
+      //
+      // ⚠️ 为什么换码必须在服务端：认证中心那张 access_token / refresh_token
+      // 一旦流经手机，截获即等于账号接管。走这条端点，它们一次都不出服务端。
+      //
+      // 带 clientId = 登记一台设备并签设备令牌（PC 桥接端用）；
+      // 不带 = 只签一枚「用户令牌」，它代表身份、不代表某台设备（手机端用）。
+      if (url.pathname === '/auth/oidc/callback' && req.method === 'POST') {
+        const raw = await readBody(req);
+        const body = raw.length ? (JSON.parse(raw.toString('utf8')) as Record<string, unknown>) : {};
+        try {
+          const who = await auth.exchange({
+            code: String(body.code || ''),
+            codeVerifier: String(body.codeVerifier || ''),
+            redirectUri: body.redirectUri ? String(body.redirectUri) : undefined,
+          });
+          const out: Record<string, unknown> = {
+            ok: true,
+            userId: who.userId,
+            sub: who.sub,
+            email: who.email,
+            username: who.preferredUsername,
+            nickname: who.name,
+          };
+          const clientId = String(body.clientId || '').trim();
+          const deviceName = body.deviceName ? String(body.deviceName) : '';
+          if (clientId) {
+            try {
+              auth.registerDevice({ clientId, userId: who.userId, deviceName });
+            } catch (e) {
+              // 这台设备已属于别的账号：不发令牌、不改绑。
+              // 能确定的只有「归属不在你这」，不该悄悄换成新账号。
+              const err = e as { message?: string; code?: string };
+              send(403, {
+                ok: false,
+                error: err.code || 'device_owned_by_other',
+                message: err.message || '该标识已属于别的账号',
+              });
+              return;
+            }
+          }
+          const issued = auth.issueDeviceToken({
+            userId: who.userId,
+            clientId,
+            deviceName: deviceName || (clientId ? '' : 'phone'),
+          });
+          out.token = issued.token;
+          out.tokenExpiresAt = issued.expiresAt;
+          out.jti = issued.jti;
+          if (clientId) out.clientId = clientId;
+          send(200, out);
+        } catch (e) {
+          const err = e as { message?: string; code?: string };
+          send(err.code === 'bad_request' ? 400 : 401, {
+            ok: false,
+            error: err.code || 'auth_failed',
+            message: err.message || '换令牌失败',
+          });
+        }
+        return;
+      }
+
       // ── 用认证中心的 access_token 换本服务的设备令牌 ──
       // 注意这里读的是 **Authorization**：这一段是「拿认证中心的令牌换设备令牌」，
       // 与 L1 的 X-Mn-Ws-Token 不是一回事。
@@ -251,7 +327,7 @@ export function createServer(userConfig: ServerOptions = {}) {
       // ── 元信息目录：登录后拉「哪些可以路由」 ──
       // 远端客户端拿到凭据后的第一步就是拉这份目录 —— 看清有哪些应用、
       // 各自在哪个端口、由哪台桥承载，再决定调哪个、怎么调（路径前缀或
-      // X-Nx-App 头）。
+      // X-Mn-Ws-App 头）。
       if (url.pathname === '/api/catalog') {
         const caller = identifyCaller(req);
         if (!caller.ok) { sendRes(res, caller.status, { ok: false, error: caller.error }); return; }
@@ -414,6 +490,28 @@ export function createServer(userConfig: ServerOptions = {}) {
     maxPayload: MAX_BODY_BYTES * 2,
   });
 
+  // ── 心跳：回收已经死了的连接 ──────────────────────────────────────────
+  //
+  // 为什么必须有：TCP 是**半开**的 —— 容器被 `docker rm` 掉时对端不一定
+  // 发来 FIN/RST（跨境链路 + 运营商 NAT 下 RST 会丢）。没有心跳，服务端会
+  // 一直留着一条**已经死了**的桥：那台机器上的 app 还在路由表里，
+  // 请求转发过去全部超时，而桥自己早就不知道了。
+  //
+  // 做法是经典的 isAlive 配方：每轮把还活着的连接标成「待确认」并 ping，
+  // 下一轮还在等 pong 的就是死了的，直接 terminate。
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      const meta = ws as unknown as { isAlive?: boolean };
+      if (meta.isAlive === false) {
+        try { ws.terminate(); } catch { /* ignore */ }
+        continue;
+      }
+      meta.isAlive = false;
+      try { ws.ping(); } catch { /* ignore */ }
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+  heartbeat.unref?.();
+
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const peerId = `peer-${nextPeerId++}`;
     peers.set(ws, {
@@ -438,9 +536,6 @@ export function createServer(userConfig: ServerOptions = {}) {
       protocol: 1,
     });
 
-    (ws as unknown as { isAlive: boolean }).isAlive = true;
-    ws.on('pong', () => { (ws as unknown as { isAlive: boolean }).isAlive = true; });
-
     ws.on('message', (raw: unknown) => {
       const msg = decodeFrame(raw);
       if (!msg) {
@@ -451,6 +546,14 @@ export function createServer(userConfig: ServerOptions = {}) {
       }
       const meta = peers.get(ws);
       if (!meta) return;
+
+      // ── 应用层心跳 ────────────────────────────────────────────────
+      // 协议里定义了 ping/pong，但一直没有人发 —— client 半靠它判活，
+      // server 半靠它回收死连接。两边都接上，心跳才真的闭环。
+      if (msg.type === FRAME.PING) {
+        sendWs(ws, { type: FRAME.PONG });
+        return;
+      }
 
       // ── 注册 ──
       if (msg.type === FRAME.REGISTER) {
@@ -734,7 +837,7 @@ export function createServer(userConfig: ServerOptions = {}) {
    * 判定调用方身份（L1 通道层）。
    *
    * 凭据走**独立头** `X-Mn-Ws-Token`，**不占用 Authorization** ——
-   * Authorization 是留给 nx 自己的（L3 应用层，nx-kv 就是读
+   * Authorization 是留给被代理的服务自己的（L3 应用层，很多服务就是读
    * `Authorization: Bearer <token>`）。两层用同一个头会互相打架：
    * 门禁令牌被 nx 当成会话令牌去校验 → 401；反过来也一样。
    */
@@ -827,6 +930,7 @@ export function createServer(userConfig: ServerOptions = {}) {
 
   async function close(): Promise<void> {
     logger.info('shutting down');
+    clearInterval(heartbeat);
     for (const [, p] of pending) {
       clearTimeout(p.timer);
       try { sendRes(p.res, 503, { ok: false, error: 'shutting_down' }); } catch { /* ignore */ }
@@ -859,7 +963,7 @@ export function createServer(userConfig: ServerOptions = {}) {
     stats,
     listen,
     close,
-    APP_HEADER: 'x-nx-app',
+    APP_HEADER,
   };
 }
 

@@ -57,9 +57,8 @@ const BUILTINS: AnyCommand[] = [
       port: { type: 'number', default: DEFAULT_PORT },
       url: { type: 'string', hint: 'server 半的 ws:// 地址' },
       token: { type: 'string', hint: '注册门禁（静态门禁或设备令牌）' },
-      apps: { type: 'string', hint: '白名单：逗号分隔的应用名' },
-      ports: { type: 'string', hint: '白名单：逗号分隔的本地端口' },
-      'app-map': { type: 'string', hint: '显式基址，如 nx-kv=http://127.0.0.1:7999' },
+      apps: { type: 'string', hint: '白名单：逗号分隔的应用名，可带基址，如 my-api=http://127.0.0.1:9999' },
+      'app-map': { type: 'string', hint: '显式基址，如 my-api=http://127.0.0.1:9999' },
       'device-name': { type: 'string', hint: '桥的显示名' },
       'log-level': { type: 'string', hint: 'debug | info | warn | error' },
       'no-open': { type: 'boolean' },
@@ -277,7 +276,7 @@ function fail(err: unknown, json: boolean): void {
 /**
  * 起桥 + 起面板。
  *
- * 这是 mn-ws client 半的**常态运行形态**：一条命令既把本机 nx 服务桥出去，
+ * 这是 mn-ws client 半的**常态运行形态**：一条命令既把本机的 HTTP 服务桥出去，
  * 又把管理面板开在本机。两者在同一个进程里 —— 面板上的「启停桥 / 改白名单」
  * 操作的就是这条正在跑的桥。
  *
@@ -389,14 +388,22 @@ async function cmdDoctor(ctx: Record<string, unknown>): Promise<void> {
 
   console.log('');
   console.log('可桥接的应用');
-  const { apps } = controller.resolveApps();
+  const { apps, titles, missing } = controller.resolveApps();
   if (!Object.keys(apps).length) {
     console.log('  ! 白名单为空 —— 一个都不桥（用 --apps 指定）');
   } else {
-    const list = await scanApps({ host: '127.0.0.1', apps: Object.keys(apps), overrides: cfg.appOverrides });
+    const list = await scanApps({
+      host: '127.0.0.1',
+      entries: Object.entries(apps).map(([app, base]) => ({ app, base, title: titles[app] })),
+    });
     for (const a of list) {
       console.log(`  ${a.app.padEnd(10)} ${String(a.port ?? '—').padEnd(7)} ${a.alive ? '✓ 在监听' : '✗ 未运行'}  ${a.base || ''}`);
     }
+  }
+  if (missing.length) {
+    // 静默跳过会让人以为「桥了但不通」—— 要说出来，并说清怎么登记
+    console.log(`  ! 这些应用没有登记基址、已跳过：${missing.join(', ')}`);
+    console.log('    登记方式：--apps 名字=http://127.0.0.1:端口，或在面板上「动态注册」');
   }
 
   console.log('');
@@ -427,7 +434,7 @@ export async function runCli(argv: string[]): Promise<void> {
       await cmdServe({});
       return;
     }
-    // 裸命令 + flag（`mn-ws --apps nx-kv`）→ 等同 `mn-ws serve --apps nx-kv`。
+    // 裸命令 + flag（`mn-ws --apps my-api`）→ 等同 `mn-ws serve --apps my-api`。
     //
     // 为什么单独认这一种：serve 的 flag 全是**运行时选择**（端口、白名单、
     // server 地址），用户不想先敲一遍 `serve` 再摆 flag。

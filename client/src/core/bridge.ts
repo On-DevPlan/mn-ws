@@ -10,7 +10,7 @@ import { describeApp, type AppDescriptor } from 'mn-ws-server/apps';
 
 /**
  * 桥接客户端的**请求还原器**：把 server 半发来的帧还原成一次真正的 HTTP 请求，
- * 打给本机的 nx 服务，再把响应封回帧。
+ * 打给本机的 HTTP 服务，再把响应封回帧。
  *
  * ## 为什么要「还原」而不是「转发」
  *
@@ -18,7 +18,7 @@ import { describeApp, type AppDescriptor } from 'mn-ws-server/apps';
  * body），不是一条活的 socket。所以这一侧必须**造一个请求**出来 ——
  * 于是「哪些头能带过去」就全靠这里的规则决定，而规则错了症状都很隐蔽：
  *
- *   · 带上 Origin → nx-kv 的跨站防护 403（直连好好的，走桥就 403）
+ *   · 带上 Origin → 目标服务的跨站防护 403（直连好好的，走桥就 403）
  *   · 带上 Connection / Transfer-Encoding → 新连接自己会重算，带过去就是错的
  *   · 带上 content-length → body 经 base64 往返后长度可能变了，对不上就挂死
  *
@@ -185,6 +185,13 @@ export class BridgeClient {
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 
+/**
+ * 心跳间隔（毫秒）：多久没收到东西就 ping 一次。
+ *
+ * 取 15s：比服务端的心跳略长一点，两边不会在同一拍上互相打断。
+ */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+
 /** 连接状态。 */
 export interface BridgeStatus {
   state: 'idle' | 'connecting' | 'connected' | 'registered' | 'reconnecting' | 'stopped' | 'shutdown' | 'error';
@@ -198,7 +205,7 @@ export interface BridgeStatus {
 /** 一条被桥的应用：基址 + 可选标题。 */
 export interface BridgeApp {
   base: string;
-  /** 显示名。动态注册的应用没有已知表可查，标题由用户给。 */
+  /** 显示名。登记时没给就用路由标识兜底。 */
   title?: string;
 }
 
@@ -232,6 +239,10 @@ export class WsBridgeClient {
   stopped = false;
   attempts = 0;
   timer: NodeJS.Timeout | null = null;
+  /** 心跳定时器：定期 ping，验证这条连接还活着。 */
+  heartbeatTimer: NodeJS.Timeout | null = null;
+  /** 上一轮 ping 是否还在等 pong。 */
+  pongPending = false;
   state: BridgeStatus['state'] = 'idle';
   bridge: BridgeClient;
 
@@ -283,6 +294,7 @@ export class WsBridgeClient {
   stop(): void {
     this.stopped = true;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this._stopHeartbeat();
     this.bridge.abortAll();
     if (this.ws) {
       try { this.ws.close(1000, 'client stopped'); } catch { /* ignore */ }
@@ -307,6 +319,7 @@ export class WsBridgeClient {
     ws.on('open', () => {
       this.attempts = 0;
       this._setState('connected');
+      this._startHeartbeat(ws);
       // 注册：带上 app 表 + 每个 app 的元信息（标题、端口），
       // server 半据此汇总成**元信息目录**，远端客户端登录后先拉目录、
       // 看清楚「哪些能路由」再选。标题是动态注册的应用唯一能被认出来的线索，
@@ -334,10 +347,14 @@ export class WsBridgeClient {
 
     ws.on('close', (code: number, reason: Buffer) => {
       this.ws = null;
+      this._stopHeartbeat();
       this.bridge.abortAll();
       if (this.stopped) { this._setState('stopped'); return; }
       this._scheduleReconnect(`连接断开（${code}${reason.length ? ` ${reason.toString()}` : ''}）`);
     });
+
+    // 收到 pong = 这条连接还活着（服务端的心跳也会回 pong）
+    ws.on('pong', () => { this.pongPending = false; });
 
     ws.on('error', (e: Error) => {
       this.logger?.warn('socket 错误', { error: e && e.message });
@@ -394,5 +411,45 @@ export class WsBridgeClient {
       this._connect();
     }, delay);
     this.timer.unref?.();
+  }
+
+  /**
+   * 起心跳：定期 ping，验证这条连接**真的还活着**。
+   *
+   * 为什么必须有：TCP 是**半开**的 —— 服务端被 `docker rm` 掉时，对端不一定
+   * 发来 FIN/RST（跨境链路 + 运营商 NAT 下 RST 会丢）。没有心跳，客户端会一直
+   * 以为「还连着」，实际上一帧也发不出去：
+   * 症状是面板显示「已连接」，但所有请求都 502，而且**永远不会自己恢复**。
+   *
+   * 心跳把这个假设变成可验证的：ping 出去，pong 回来才算活着；
+   * pong 不回来就主动 terminate，让 close 事件触发重连。
+   */
+  private _startHeartbeat(ws: WebSocket): void {
+    this._stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+      if (this.pongPending) {
+        // 上一轮 ping 没等到 pong → 连接已经死了
+        this.logger?.warn('心跳无响应，判定连接已死', { url: this.url });
+        try { ws.terminate(); } catch { /* ignore */ }
+        return;
+      }
+      this.pongPending = true;
+      try {
+        ws.ping();
+      } catch (e) {
+        this.pongPending = false;
+        this.logger?.warn('心跳发送失败', { error: (e as Error).message });
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer.unref?.();
+  }
+
+  private _stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    this.pongPending = false;
   }
 }

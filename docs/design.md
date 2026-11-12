@@ -12,7 +12,7 @@
 server 把收到的 HTTP 请求封成 WebSocket 帧发给 client；client 把帧还原成 HTTP 请求打给本机的 nx 服务端口；
 响应原路返回（HTTP → WS → HTTP）。**
 
-对客户端而言，它就是把 `http://127.0.0.1:7877/api/...` 换成了 `http://mn-ws-host/nx-kv/api/...`，
+对客户端而言，它就是把 `http://127.0.0.1:7877/api/...` 换成了 `http://mn-ws-host/my-api/api/...`，
 **状态码、响应体、鉴权头、错误格式全部一致**。
 
 **不修改任何现有 nx 服务。**
@@ -25,18 +25,20 @@ server 把收到的 HTTP 请求封成 WebSocket 帧发给 client；client 把帧
 
 | # | 目标 | 验收方式 |
 |---|---|---|
-| G1 | 现有 nx 服务**零改动**即可被 HTTP 客户端经 WS 通道访问 | nx 仓库不需要提 PR |
-| G2 | 鉴权与身份验证**由桥接层实现**，同时**保留 nx 侧原生鉴权** | 请求头原样透传，nx 的 auth 模块照常判 |
-| G3 | 客户端体感与直连 nx **完全一致** | 同一请求直连 vs 走桥，响应体/状态码逐字节相同 |
-| G4 | 一个 server 可同时服务**多个 nx 应用**，用**应用标识**区分 | `nx-kv` / `nx-rh` / `nx-sk` … 并存互不串 |
+| G1 | 现有 HTTP 服务**零改动**即可被 HTTP 客户端经 WS 通道访问 | 被桥的服务不需要提 PR |
+| G2 | 鉴权与身份验证**由桥接层实现**，同时**保留目标服务原生鉴权** | 请求头原样透传，目标服务的 auth 模块照常判 |
+| G3 | 客户端体感与直连 **完全一致** | 同一请求直连 vs 走桥，响应体/状态码逐字节相同 |
+| G4 | 一个 server 可同时服务**多个应用**，用**应用标识**区分 | `my-api` / `other-api` … 并存互不串 |
 | G5 | 客户端断连不留下悬挂请求 | HTTP 关闭 → WS `abort` 帧 → 本机请求被销毁 |
 
 ### 1.2 非目标
 
 - **不做** HTTP→WS 的**流式**双向代理（第一版只做请求-响应；协议里预留 chunk 帧位）
-- **不做** 跨主机的 nx 服务聚合（client half 只桥本机 127.0.0.1 上的端口）
+- **不做** 跨主机的服务聚合（client half 只桥本机 127.0.0.1 上的端口）
 - **不做** 替换 mn-rt。两者是**兄弟**：mn-rt 桥的是「远端 PC 的输入」，mn-ws 桥的是「本机服务」
 - **不做** 为 mn-ws 单独发明一套鉴权体系 —— 复用 go-ah 设备令牌
+- **不做** 认识任何具体服务。**「服务长什么样」是使用者的知识，不是桥的知识** ——
+  发行包里不内置任何服务的名字、端口表与用法；桥只认「名字 + 基址」这一层抽象
 
 ---
 
@@ -65,7 +67,7 @@ server 把收到的 HTTP 请求封成 WebSocket 帧发给 client；client 把帧
         └────────────┬───────────────────────────┘
                      │ HTTP（loopback）
         ┌────────────▼───────────┐   ┌──────────────┐
-        │ nx-kv  127.0.0.1:7877  │   │ nx-rh :7800  │  …
+        │ my-api  127.0.0.1:9999 │   │ other :7800 │  …
         └────────────────────────┘   └──────────────┘
 ```
 
@@ -138,7 +140,7 @@ client half 启动时在注册帧里带上**它愿意开放的端口与应用**�
 
 ```json
 {"type":"register","role":"bridge","bridgeId":"host-a",
- "apps":[{"app":"nx-kv","base":"http://127.0.0.1:7877","port":7877,"title":"KV 清单中枢"}],
+ "apps":[{"app":"my-api","base":"http://127.0.0.1:9999","port":9999,"title":"我的服务"}],
  "token":"…"}
 ```
 
@@ -150,8 +152,8 @@ server 半把这些元信息汇总成**目录**（`knownApps` + `bridges` 两张
 ① GET /api/catalog            带 L1 凭据 → 拿到可路由清单
    → { apps:[{app,title,port,base,bridgeId,connectedAt}] }
 ② 选一个 app，发请求：
-   路径前缀   GET /nx-kv/api/todo/list
-   请求头     GET /api/todo/list   + X-Nx-App: nx-kv
+   路径前缀   GET /my-api/api/todo/list
+   请求头     GET /api/todo/list   + X-Mn-Ws-App: my-api
 ```
 
 ### 多路复用
@@ -161,9 +163,9 @@ server 半把这些元信息汇总成**目录**（`knownApps` + `bridges` 两张
 或同机跑两个）天然分流：
 
 ```
-                     ┌── WS#1（host-a：nx-kv）──▶ 127.0.0.1:7877
+                     ┌── WS#1（host-a：my-api）──▶ 127.0.0.1:9999
 客户端 ──HTTP──▶ server ─┤
-                     └── WS#2（host-b：nx-rh）──▶ 127.0.0.1:7800
+                     └── WS#2（host-b：other-api）──▶ 127.0.0.1:7800
 ```
 
 一个 app 被两个 client 声明 → **后来者顶替前者**（同机跑两份 nx 是异常状态，
@@ -183,14 +185,14 @@ server 半把这些元信息汇总成**目录**（`knownApps` + `bridges` 两张
 **主路径：路径前缀**
 
 ```
-POST /nx-kv/api/todo/add          → app = nx-kv, path = /api/todo/add
-GET  /nx-rh/api/repos/list         → app = nx-rh, path = /api/repos/list
+POST /my-api/api/todo/add          → app = my-api, path = /api/todo/add
+GET  /other-api/api/repos/list      → app = other-api, path = /api/repos/list
 ```
 
 **辅路径：请求头**（给不想改 URL 的既有客户端）
 
 ```
-POST /api/todo/add   X-Nx-App: nx-kv   → app = nx-kv, path = /api/todo/add
+POST /api/todo/add   X-Mn-Ws-App: my-api   → app = my-api, path = /api/todo/add
 ```
 
 **优先级**：路径前缀 > 请求头。两者都缺 → `400 app_required`。
@@ -202,26 +204,28 @@ POST /api/todo/add   X-Nx-App: nx-kv   → app = nx-kv, path = /api/todo/add
 > 3. 一个请求只对应一个 app，天然没有「路径说 A、头说 B」的歧义。
 >
 > 请求头方案保留，是因为已有一批客户端是按 `http://host:7877/api/...` 写的，
-> 只想换主机不想改 URL —— 那就靠 `X-Nx-App` 或把整段 host 前缀带上。
+> 只想换主机不想改 URL —— 那就靠 `X-Mn-Ws-App` 或把整段 host 前缀带上。
 
 ### 5.2 注册表
 
-client half 启动时声明自己能桥什么：
+client half 启动时声明自己能桥什么 —— **一整张表**（名字 + 基址 + 标题）：
 
 ```json
 {"type":"register","role":"bridge","bridgeId":"host-a","apps":[
-  {"app":"nx-kv","base":"http://127.0.0.1:7877"},
-  {"app":"nx-rh","base":"http://127.0.0.1:7800"}
+  {"app":"my-api","base":"http://127.0.0.1:9999","title":"我的服务"},
+  {"app":"other-api","base":"http://127.0.0.1:7800"}
 ]}
 ```
 
 server 半维护 `bridges: Map<app, {ws, bridgeId}>`。
 
 **同一 app 被两个 client 注册** → 默认**后来者顶替前者**，并记 warning
-（同一台机器跑了两份 nx 是异常状态；顶替比让请求随机打到其中一个更可预期）。
-server 半回 `registered` 帧告知结果，被顶替的 client 收到后应**退出**（否则它会以为自己还在线）。
+（同一台机器跑了两份是异常状态；顶替比让请求随机打到其中一个更可预期）。
+顶替者断开时，app **归还**给仍连着的旧桥（见 K34）。
 
-**app 名规范**：`^[a-z][a-z0-9-]{0,31}$`（与 nx 系列的两字母族谱对齐：`nx-kv` / `nx-rh` / …）。
+**app 名规范**：`^[a-z][a-z0-9-]{0,31}$` —— 它要当**路由标识**用
+（路径前缀 / `X-Mn-Ws-App` 头），必须是合法标识符。
+**名字本身不携带任何关于被桥服务的信息**：它是路由用的，不是业务描述。
 
 ---
 
@@ -235,7 +239,7 @@ server 半回 `registered` 帧告知结果，被顶替的 client 收到后应**�
 |---|---|
 | server → client | `{"type":"welcome","peerId":"peer-1","server":"mn-ws-server","wsPath":"/ws"}` |
 | client → server | `{"type":"register","role":"bridge","bridgeId":"host-a","apps":[…],"token":"…"}` |
-| server → client | `{"type":"registered","bridgeId":"host-a","apps":["nx-kv","nx-rh"],"replaced":["nx-ft"]}` |
+| server → client | `{"type":"registered","bridgeId":"host-a","apps":["my-api","other-api"],"replaced":["old-api"]}` |
 | server → client | `{"type":"error","error":"register_failed","detail":"…"}` |
 
 未注册完成的连接**不接受任何请求帧**（与 mn-rt 的 `registered` 门禁同款）。
@@ -248,7 +252,7 @@ server 半回 `registered` 帧告知结果，被顶替的 client 收到后应**�
 {
   "type": "request",
   "id": "r-000123",
-  "app": "nx-kv",
+  "app": "my-api",
   "method": "POST",
   "path": "/api/todo/add",
   "query": {"limit": "20"},
@@ -348,8 +352,8 @@ client 半：pendingLocal.set(id, req) → 收到 abort 时销毁对应 req
 
 > ### ⚠️ L1 与 L3 必须用不同的头（实现时踩到并修正）
 >
-> 最初设计里 L1 也用 `Authorization: Bearer`，但 nx-kv 自己就是读
-> `Authorization: Bearer <token>`（`src/modules/*/index.js` 里的 `headers.authorization`）。
+> 最初设计里 L1 也用 `Authorization: Bearer`，但被代理的服务自己就是读
+> `Authorization: Bearer <token>`（很多服务都是这么读的）。
 > 两层共用一个头会**互相打架**：
 > - 门禁令牌被 nx 当成会话令牌去校验 → nx 401
 > - 反过来 nx 的会话令牌被当门禁 → 桥 401
@@ -459,8 +463,11 @@ mn-ws 的两端分处公网与内网，吊销诉求本来就不一样。
 | **K30** | **keep-alive 连接让 `httpServer.close()` 永不返回** | Node 19+ 的全局 agent 默认 keepAlive，而 `httpServer.close()` 会**等这些空闲连接自己结束**才回调 → shutdown 永远不返回。生产上表现为 SIGTERM 后容器不退出，只能等编排强杀；测试里表现为「整套测试挂死」 | close 时显式 `httpServer.closeAllConnections()`（pending 请求已经回了 503，断连接是安全的） |
 | **K31** | **块注释里出现 `*/` 提前闭合注释** | 端口通配的形态是「星号紧跟斜杠」，写在**块注释里**会把注释提前闭合 —— 文件后半截被当成代码，报一堆莫名其妙的语法错（TS1434/TS1443…），而报错位置离真正的祸首十万八千里 | 注释里不写字面量，改写成「任意端口」；mn-rt 的代码里同样踩过这个坑并留了警告 |
 | **K32** | **「是不是自定义」与「标题是什么」共用一个 Map** | `resolveApps` 里用一个 Map 同时记「这是自定义应用」和「它的标题」。于是**没填标题的自定义应用查不到 → 被当成「不在表里」→ 基址算不出来 → 整个应用被丢掉**。症状是「界面上明明加了，桥过去却 404 unknown_app」 | 拆成两个结构：`Set` 记「是不是自定义」、`Map` 记「标题」。凡是一个 Map 同时承担两种语义，都要停下来想想 |
-| **K33** | **server 半不替 client 半猜标题** | 动态注册的应用不在已知表里，标题只有 client 半知道（用户自己起的名）。server 若按自己的表回落，远端目录里显示的就是裸的应用名 | `describeApp(app, base, title?)` 接受客户端自报的标题：给了就用它的，不给才回落已知表。注册帧的 `apps[]` 带上 `title` |
+| **K33** | **server 半不替 client 半猜标题** | 应用标题只有 client 半知道（用户自己起的名）。server 若按自己的表回落，远端目录里显示的就是裸的应用名 | `describeApp(app, base, title?)` 接受客户端自报的标题：给了就用它的，不给就用**应用名**兜底（没有任何表可回落）。注册帧的 `apps[]` 带上 `title` |
 | **K34** | **顶替者断开后，app 不会回到还活着的旧桥** | 「一个 app 同时只有一个桥，后来者顶替前者」是对的，但**顶替时旧桥那条路由被删掉后没有回收**：新桥一旦先断开，服务端只把新桥的 app 摘干净，旧桥明明**还连着**却接不到任何请求 —— 这个 app 就成了「注册过但没人能路由」，调用方永远拿到 502。实测踩过：用静态门禁的桥连上来顶掉用户桥，门禁桥一断，用户桥的 app 全部哑掉（`/health` 里 `bridges: 0`，而客户端的 TCP 连接明明是 Established） | 每条连接记下自己**注册过**的 app 表（`meta.appList`）；顶替者断开时把「现在没有主人」的 app 归还给仍连着、且注册过同名 app 的旧桥。后来者仍然优先（app 有主人就不动） |
+| **K35** | **把某个服务族的名字与端口写进发行包** | 发行包里内置了一张「本机可能有什么」的应用表（名字 → 默认端口 → 标题）。于是：① 桥背上别人的业务知识 —— 那个族一改版，桥就得跟着改；② 想桥一个不在表里的服务，只能走「动态注册」这条补丁路径；③ 表里的服务**换端口**就得改代码 | 发行包里**不留任何具体服务的知识**。桥只认「名字 + 基址 + 标题」这一层抽象，登记表完全由使用者填（`--apps name=base` / 面板动态登记）。server 半从注册帧里学到它们，自己不查任何表 |
+| **K36** | **业务令牌该在客户端换还是在服务端换** | 先做成了「客户端拿授权码去认证中心换 access_token，再拿它来换本服务令牌」—— 换码在客户端。后果是：**认证中心那张 access_token 流经了客户端**。它指向的是整个平台的身份，截获即等于账号接管；而客户端与服务端之间的那一跳还是明文 | 换码放**服务端**：`POST /auth/oidc/callback` 收 code + verifier，服务端拿 **client 半的身份**（`mn-ws-client`）去认证中心换，再签一枚本服务自己的令牌。认证中心那张票一次都不出服务端。业务令牌因此天然归属业务方 —— 与 mn-rt 的 `/auth/oidc/callback` 完全同构 |
+| **K37** | **半开的 TCP 连接不会被发现** | 容器被 `docker rm` 掉时，对端不一定发来 FIN/RST（跨境链路 + 运营商 NAT 下 RST 会丢）。于是客户端以为「还连着」，实际上一帧也发不出去：面板显示已连接，所有请求却 502，而且**永远不会自己恢复**（server 那边也一样：死桥的 app 一直挂在路由表里） | 两端都定期 ping 对方（协议级 ping/pong）：客户端收不到 pong 就 `terminate`，让 close 事件触发重连；服务端收不到 pong 就踢掉那条连接，路由表不留僵尸 |
 
 ---
 
@@ -543,16 +550,16 @@ method / path / query / headers / body 与原始请求一致
 ```
 同一请求：
   A) curl http://127.0.0.1:7877/api/todo/list
-  B) curl http://mn-ws-host/nx-kv/api/todo/list
-断言：状态码相同 ∧ 响应体逐字节相同 ∧ nx 侧收到的请求头相同（除 §10 例外）
+  B) curl http://mn-ws-host/my-api/api/todo/list
+断言：状态码相同 ∧ 响应体逐字节相同 ∧ 目标服务侧收到的请求头相同（除 §10 例外）
 ```
 
 **这是「体感一致」唯一的可靠验收方式**，必须写成自动化测试，不能靠人眼看。
 
 ### 13.4 真机验收
 
-对**每一个**要接入的 nx 服务跑一遍 §13.3 —— 尤其是 nx-kv（有 `originAllowed` 与 24MB body 上限）
-与 nx-as（网关本身，桥接它需要额外小心）。
+对**每一个**要接入的服务跑一遍 §13.3 —— 尤其是带同源校验或大 body 上限的那些
+与网关类服务（桥接它需要额外小心）。
 
 ---
 
@@ -566,7 +573,7 @@ method / path / query / headers / body 与原始请求一致
 | Q2 | server 部署在哪 | 与 mn-rt 同机 `1.94.101.189`，端口 **7777** | 待部署 |
 | Q3 | client 半怎么常驻 | 本机 **systemd**（Windows 侧先手工/计划任务） | 待部署 |
 | Q4 | 仓库落点 | `D:\code\a_js\proj\mn-ws`（纯 Node，与 nx 同栈同机） | 已定 |
-| Q5 | 应用标识形态 | **路径前缀优先 + `X-Nx-App` 兜底**；冲突报错不猜 | 已定 |
+| Q5 | 应用标识形态 | **路径前缀优先 + `X-Mn-Ws-App` 兜底**；冲突报错不猜 | 已定 |
 | Q6 | 客户端是谁 | 先做**通用**（任何 HTTP 客户端可用） | 已定 |
 | Q7 | L1 门禁用什么 | 设备令牌（生产）/ 静态门禁（自测）；**L1 走 `X-Mn-Ws-Token`，不占 `Authorization`** | 已定 |
 | Q8 | go-ah 侧改动 | 需新增 `mn-ws` 预置客户端（现有 5 个之外） | **待办** |
@@ -602,25 +609,23 @@ server → client
   shutdown   {type, reason}
 ```
 
-## 附录 B：nx 系列端口速查（供 client half 配置 app 表）
+## 附录 B：应用登记表怎么填
 
-> **2026-11-12 实测自各仓 `src/core/paths.js` 的 `DEFAULT_PORT`（及 `package.json` / `store.js`）**。
-> 注意：看板描述里 nx-nx=7881 / nx-kn=7882 **是过期的**，实际 nx-nx=7880、nx-kn=7881（端口重排时对调过）。
+> **本项目不再内置任何服务表**（见 K35）。下表是**填法示例**，不是内置数据 ——
+> 发行包里没有这张表，client half 也没有「已知服务」这层概念。
 
-| app | 端口 | 服务 |
+| 字段 | 含义 | 例 |
 |---|---|---|
-| nx-rh | 7800 | 仓库与 Skill 中枢 |
-| nx-rp | 7820 | 外部上下文（deps/hook/批注） |
-| nx-sk | 7866 | 个人资源与密钥（`pkg.nxSk.port` 可覆盖） |
-| nx-ft | 7869 | 前端资源管理 |
-| nx-kv | 7877 | KV 清单中枢 |
-| nx-nx | 7880 | 项目生成器 |
-| nx-kn | 7881 | Obsidian 知识库 |
-| nx-ditto | 7883 | ditto |
-| nx-pg | 7888 | 画布工作台 |
-| nx-pn | 4561 | `NX_PN_PORT` 环境变量指定 |
-| nx-as | 17801 | 网关（`NXAS_API_PORT`；`NXAS_LISTEN_PORT=18090`）—— **不是普通 nx 服务，桥接它要额外小心** |
+| `name` | 路由标识（小写字母开头，只含小写字母/数字/连字符） | `my-api` |
+| `base` | 本地基址（端口是它的一部分，不是另填的一张表） | `http://127.0.0.1:9999` |
+| `title` | 显示名（远端目录里给人看）；不给就用 name | `我的服务` |
 
-> 端口来自各仓的 `DEFAULT_PORT`。**client half 的 app 表不要硬编码这些端口** ——
-> 由配置文件给出，默认值只是兜底（与 mn-rt 客户端「最后一次成功连接 = 下次默认」的思路一致）。
+填法（两种等价）：
+
+```bash
+mn-ws apps set --apps my-api=http://127.0.0.1:9999,other-api=http://127.0.0.1:7800
+mn-ws apps add my-api --port 9999 --title '我的服务'
+```
+
+> 端口变了就改 base —— 桥不猜端口，也不替使用者决定「哪个服务跑在哪个端口」。
 

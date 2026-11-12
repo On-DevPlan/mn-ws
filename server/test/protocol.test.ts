@@ -12,12 +12,12 @@ import {
   nextRequestId, MAX_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT_MS, FRAME,
 } from '../src/protocol.js';
 import {
-  resolveApp, isValidAppName, baseOf, describeApp, KNOWN_APPS,
+  resolveApp, isValidAppName, describeApp, portOfBase,
   RESERVED_PATH_SEGMENTS, APP_HEADER, isPortFree, scanApps,
 } from '../src/apps.js';
 
 test('帧编码解码：往返一致', () => {
-  const obj = { type: FRAME.REQUEST, id: 'r1', app: 'nx-kv', body: 'aGk=' };
+  const obj = { type: FRAME.REQUEST, id: 'r1', app: 'my-api', body: 'aGk=' };
   const decoded = decodeFrame(encodeFrame(obj));
   assert.deepEqual(decoded, obj);
 });
@@ -84,17 +84,17 @@ test('头压平：空数组的键直接不出现', () => {
 });
 
 test('应用标识：路径前缀优先', () => {
-  const r = resolveApp('/nx-kv/api/todo/list', normalizeHeaders({}));
-  assert.deepEqual(r, { app: 'nx-kv', path: '/api/todo/list' });
+  const r = resolveApp('/my-api/api/todo/list', normalizeHeaders({}));
+  assert.deepEqual(r, { app: 'my-api', path: '/api/todo/list' });
 });
 
 test('应用标识：请求头也认', () => {
-  const r = resolveApp('/api/todo/list', normalizeHeaders({ 'X-Nx-App': 'nx-kv' }));
-  assert.deepEqual(r, { app: 'nx-kv', path: '/api/todo/list' });
+  const r = resolveApp('/api/todo/list', normalizeHeaders({ 'X-Mn-Ws-App': 'my-api' }));
+  assert.deepEqual(r, { app: 'my-api', path: '/api/todo/list' });
 });
 
 test('应用标识：两者冲突 → app_conflict（不猜）', () => {
-  const r = resolveApp('/nx-kv/api/x', normalizeHeaders({ 'X-Nx-App': 'nx-rh' }));
+  const r = resolveApp('/my-api/api/x', normalizeHeaders({ 'X-Mn-Ws-App': 'other-api' }));
   assert.deepEqual(r, { error: 'app_conflict' });
 });
 
@@ -111,34 +111,39 @@ test('应用标识：保留段不会被当成 app（K20 的坑）', () => {
 });
 
 test('应用标识：非法名字 → invalid_app_name', () => {
-  const r = resolveApp('/api/x', normalizeHeaders({ 'X-Nx-App': 'Bad Name' }));
+  const r = resolveApp('/api/x', normalizeHeaders({ 'X-Mn-Ws-App': 'Bad Name' }));
   assert.deepEqual(r, { error: 'invalid_app_name' });
 });
 
 test('应用标识：尾部斜杠被规范化', () => {
-  const r = resolveApp('/nx-kv/api/x/', normalizeHeaders({}));
-  assert.deepEqual(r, { app: 'nx-kv', path: '/api/x' });
+  const r = resolveApp('/my-api/api/x/', normalizeHeaders({}));
+  assert.deepEqual(r, { app: 'my-api', path: '/api/x' });
 });
 
 test('app 名合法性', () => {
-  assert.equal(isValidAppName('nx-kv'), true);
-  assert.equal(isValidAppName('Nx-kv'), false);
-  assert.equal(isValidAppName('-nx'), false);
-  assert.equal(isValidAppName('nx_kv'), false);
+  assert.equal(isValidAppName('my-api'), true);
+  assert.equal(isValidAppName('My-api'), false);
+  assert.equal(isValidAppName('-api'), false);
+  assert.equal(isValidAppName('my_api'), false);
   assert.equal(isValidAppName(''), false);
 });
 
-test('基址解析：覆盖优先，其次已知端口', () => {
-  assert.equal(baseOf('nx-kv', { 'nx-kv': { base: 'http://127.0.0.1:9999' } }), 'http://127.0.0.1:9999');
-  assert.equal(baseOf('nx-kv', null), `http://127.0.0.1:${KNOWN_APPS['nx-kv']!.port}`);
-  assert.equal(baseOf('no-such-app', null), null);
+test('端口从基址里取 —— 没有第二张端口表', () => {
+  assert.equal(portOfBase('http://127.0.0.1:9999'), 9999);
+  assert.equal(portOfBase('http://127.0.0.1'), null);
+  assert.equal(portOfBase(null), null);
+  assert.equal(portOfBase('不是 URL'), null);
 });
 
-test('应用描述：端口与标题', () => {
-  const d = describeApp('nx-kv', 'http://127.0.0.1:7877');
-  assert.equal(d.port, 7877);
-  assert.equal(d.title, KNOWN_APPS['nx-kv']!.title);
-  assert.equal(d.known, true);
+test('应用描述：端口与标题都来自登记信息，没有内置表可回落', () => {
+  const d = describeApp('my-api', 'http://127.0.0.1:9999', '我的服务');
+  assert.equal(d.port, 9999);
+  assert.equal(d.title, '我的服务');
+  assert.equal(d.base, 'http://127.0.0.1:9999');
+
+  // 没给标题就用名字兜底 —— server 不替 client 猜「默认叫什么」
+  const noTitle = describeApp('my-api', 'http://127.0.0.1:9999');
+  assert.equal(noTitle.title, 'my-api');
 });
 
 test('端口预检：被占的端口识别得出来', async () => {
@@ -156,14 +161,18 @@ test('端口预检：空闲端口识别得出来', async () => {
 });
 
 test('扫描只给事实，不替用户决定能不能桥', async () => {
-  const list = await scanApps({ host: '127.0.0.1', apps: ['nx-kv'] });
+  const list = await scanApps({
+    host: '127.0.0.1',
+    entries: [{ app: 'my-api', base: 'http://127.0.0.1:9', title: '我的服务' }],
+  });
   assert.equal(list.length, 1);
-  assert.equal(list[0]!.app, 'nx-kv');
+  assert.equal(list[0]!.app, 'my-api');
+  assert.equal(list[0]!.title, '我的服务');
   assert.equal(typeof list[0]!.alive, 'boolean');
 });
 
 test('协议常量：上限与超时', () => {
   assert.equal(MAX_BODY_BYTES, 24 * 1024 * 1024);
   assert.equal(DEFAULT_REQUEST_TIMEOUT_MS, 30_000);
-  assert.equal(APP_HEADER, 'x-nx-app');
+  assert.equal(APP_HEADER, 'x-mn-ws-app');
 });

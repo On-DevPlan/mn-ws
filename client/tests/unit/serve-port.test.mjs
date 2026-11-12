@@ -180,6 +180,6 @@ test('resolvePortConflict: 探测不出占用者 → shift，占用者记为未�
 });
 
 test('describeOccupant: 探测得到就是它的 app 名', () => {
-  assert.equal(describeOccupant('nx-kv'), 'nx-kv');
+  assert.equal(describeOccupant('my-api'), 'my-api');
   assert.equal(describeOccupant(null), '未知服务');
 });

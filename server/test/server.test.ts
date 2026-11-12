@@ -124,6 +124,144 @@ function httpGet(url: string, headers: Record<string, string> = {}): Promise<{ s
   });
 }
 
+function httpPost(url: string, payload: unknown, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const raw = JSON.stringify(payload);
+    const req = http.request({
+      method: 'POST', hostname: u.hostname, port: u.port, path: u.pathname,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(raw), ...headers },
+      timeout: 8000,
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('timeout', () => req.destroy(new Error('超时')));
+    req.on('error', reject);
+    req.write(raw);
+    req.end();
+  });
+}
+
+/**
+ * 起一个最小假认证中心：发现文档 + token 端点 + userinfo。
+ *
+ * 为什么打桩而不是直连线上认证中心：线上那条真链路需要一个能登录的账号，
+ * 而 CI 里不该存生产口令。这里覆盖的是**本服务这一段实现的正确性**
+ * （表单字段名、用 client 半的身份、不带 secret、用完即弃、拿 sub 当属主）；
+ * 与真实认证中心的互操作由公网远端验收覆盖。
+ */
+async function startFakeIdp({ expectVerifier }: { expectVerifier?: string } = {}): Promise<{
+  hits: { token: number; userinfo: number; lastTokenForm: Record<string, string> | null; lastAuth: string };
+  issuer: string;
+  close: () => Promise<void>;
+}> {
+  const hits: { token: number; userinfo: number; lastTokenForm: Record<string, string> | null; lastAuth: string } =
+    { token: 0, userinfo: 0, lastTokenForm: null, lastAuth: '' };
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url || '/', 'http://x');
+    const send = (code: number, obj: unknown): void => {
+      res.writeHead(code, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(obj));
+    };
+    if (u.pathname === '/.well-known/openid-configuration') {
+      const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      return send(200, {
+        issuer: base,
+        authorization_endpoint: `${base}/oauth2/auth`,
+        token_endpoint: `${base}/oauth2/token`,
+        userinfo_endpoint: `${base}/oauth2/userinfo`,
+      });
+    }
+    if (u.pathname === '/oauth2/token') {
+      hits.token += 1;
+      let raw = '';
+      req.on('data', (c: Buffer) => { raw += c.toString(); });
+      req.on('end', () => {
+        const form = Object.fromEntries(new URLSearchParams(raw));
+        hits.lastTokenForm = form;
+        if (expectVerifier && form.code_verifier !== expectVerifier) {
+          return send(400, { error: 'invalid_grant' });
+        }
+        send(200, { access_token: 'IDP-AT-1', refresh_token: 'IDP-RT-SECRET', token_type: 'Bearer' });
+      });
+      return undefined;
+    }
+    if (u.pathname === '/oauth2/userinfo') {
+      hits.userinfo += 1;
+      hits.lastAuth = req.headers.authorization || '';
+      if (hits.lastAuth !== 'Bearer IDP-AT-1') return send(401, { error: 'invalid_token' });
+      return send(200, { sub: 'sub-777', email: 'p@x.io', name: '跑批', preferred_username: 'pao' });
+    }
+    return send(404, { error: 'not_found' });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return {
+    hits,
+    issuer: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+    // ⚠️ 必须显式掐掉 keep-alive 连接：Node 19+ 的全局 agent 默认 keepAlive，
+    // 而 server.close() 会**等这些空闲连接自己结束**才回调 —— 套件会挂死。
+    // 这正是 K30 那个坑在测试里的翻版。
+    close: () => new Promise((r) => {
+      server.closeAllConnections?.();
+      server.close(() => r());
+    }),
+  };
+}
+
+test('业务令牌端点：授权码换到本服务令牌，认证中心的凭据一个字节都不外流', async () => {
+  const verifier = 'a-test-verifier-value-0123456789abcdef';
+  const idp = await startFakeIdp({ expectVerifier: verifier });
+  const server = createServer({
+    host: '127.0.0.1', port: 0, token: 'gate-token',
+    issuer: idp.issuer, idpClientId: 'mn-ws-server', loginClientId: 'mn-ws-client',
+    redirectUri: 'http://127.0.0.1:39471/callback',
+    jwtSecret: 'cb-test-secret', authEnabled: true,
+    dataDir: null, logLevel: 'error',
+  });
+  const port = await server.listen();
+
+  try {
+    const res = await httpPost(`http://127.0.0.1:${port}/auth/oidc/callback`, {
+      code: 'CODE-1',
+      codeVerifier: verifier,
+      redirectUri: 'http://127.0.0.1:39471/callback',
+    });
+    assert.equal(res.status, 200, res.body);
+    const j = JSON.parse(res.body);
+    assert.equal(j.ok, true);
+    // 属主必须是认证中心自己断言的 sub
+    assert.equal(j.userId, 'sub-777');
+    assert.ok(j.token, '应回本服务的令牌');
+    assert.ok(j.tokenExpiresAt, '应回本服务令牌的到期时间');
+
+    // 换码用的身份必须是 **client 半的**：授权码按 client_id 绑定，
+    // 换的时候用别的 id 会被认证中心判 invalid_grant
+    assert.equal(idp.hits.lastTokenForm?.client_id, 'mn-ws-client');
+    assert.equal(idp.hits.lastTokenForm?.code_verifier, verifier);
+    assert.ok(!('client_secret' in (idp.hits.lastTokenForm || {})), '公共客户端不得发 client_secret');
+
+    // 关键隐私断言：认证中心的 refresh_token / access_token 绝不外流
+    assert.ok(!res.body.includes('IDP-RT-SECRET'), 'refresh_token 不得出现在响应里');
+    assert.ok(!res.body.includes('IDP-AT-1'), 'access_token 不得回带给客户端');
+    // 设备注册表里也不能落认证中心的凭据
+    const persisted = JSON.stringify(server.auth.devices);
+    assert.ok(!persisted.includes('IDP-RT-SECRET') && !persisted.includes('IDP-AT-1'),
+      '设备注册表不得存认证中心的凭据');
+
+    // verifier 不匹配必须失败，且不得因此签出任何令牌
+    const bad = await httpPost(`http://127.0.0.1:${port}/auth/oidc/callback`, {
+      code: 'CODE-2', codeVerifier: 'WRONG', redirectUri: 'http://127.0.0.1:39471/callback',
+    });
+    assert.equal(bad.status, 401, `verifier 不匹配必须 401，实到 ${bad.status}`);
+    assert.ok(!JSON.parse(bad.body).token, '失败路径不得发令牌');
+  } finally {
+    await server.close();
+    await idp.close();
+  }
+});
+
 test('端到端：请求穿过 WS 到达本机应用，响应原样回来', async () => {
   const nx = await startFakeNx();
   const server = createServer({
@@ -180,7 +318,7 @@ test('端到端：无 L1 凭据 → 401；未知应用 → 404', async () => {
   await server.close();
 });
 
-test('动态注册的应用：标题原样进目录，且能被 X-Nx-App 命中', async () => {
+test('动态注册的应用：标题原样进目录，且能被 X-Mn-Ws-App 命中', async () => {
   const nx = await startFakeNx();
   const server = createServer({ host: '127.0.0.1', port: 0, token: 'gate-token', dataDir: null, logLevel: 'error' });
   const port = await server.listen();
@@ -201,7 +339,7 @@ test('动态注册的应用：标题原样进目录，且能被 X-Nx-App 命中'
   // ② 远端用请求头命中它
   const viaHeader = await httpGet(`http://127.0.0.1:${port}/api/ping`, {
     'x-mn-ws-token': 'gate-token',
-    'x-nx-app': 'my-api',
+    'x-mn-ws-app': 'my-api',
   });
   assert.equal(viaHeader.status, 200, viaHeader.body);
   assert.equal(JSON.parse(viaHeader.body).url, '/api/ping');
@@ -342,7 +480,7 @@ test('顶替者断开后 app 归还给仍连着的旧桥（不再变成没人能
 
     const res = await httpGet(`http://127.0.0.1:${port}/api/ping`, {
       'x-mn-ws-token': 'gate-token',
-      'x-nx-app': 'my-api',
+      'x-mn-ws-app': 'my-api',
     });
     assert.equal(res.status, 200, res.body);
     assert.equal(JSON.parse(res.body).url, '/api/ping');

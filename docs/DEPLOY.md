@@ -144,15 +144,15 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 | 容器 | `mn_ws_server` up，`0.0.0.0:7777->7777/tcp`，镜像 `mn-ws-server:latest` |
 | `/health` | `{"ok":true,"service":"mn-ws-server","authEnabled":true}` |
 | `/auth/oidc/config` | `clientId=mn-ws-server` + `loginClientId=mn-ws-client` + `enabled=true` + `idpAvailable=true` |
-| 公网端到端 | 远端 HTTP 客户端 → 公网 server → WS → 本机 nx-kv，**200 pong** |
-| 路由两种写法 | 路径前缀 `/nx-kv/api/ping` 与请求头 `X-Nx-App: nx-kv` + `/api/ping` 结果一致 |
+| 公网端到端 | 远端 HTTP 客户端 → 公网 server → WS → 本机被桥服务，**200 pong** |
+| 路由两种写法 | 路径前缀 `/my-api/api/ping` 与请求头 `X-Mn-Ws-App: my-api` + `/api/ping` 结果一致 |
 | L1 拦截 | 无 `X-Mn-Ws-Token` → 401；未知应用 → 404 `unknown_app` |
-| L3 透传 | 业务 action 被 **nx-kv 自己的鉴权**拦下（`未登录或登录已过期`），说明桥没改写凭据 |
+| L3 透传 | 业务 action 被 **被桥服务自己的鉴权**拦下（`未登录或登录已过期`），说明桥没改写凭据 |
 | 面板门禁 | `/` 200、`/api/auth/status` 200（豁免）、`/api/bridge/status` **401 not_logged_in** |
-| 已发布的包 | `npx mn-ws@0.2.1` 实跑：起桥 + 起面板 + 桥接公网 server，全部正常 |
+| 业务令牌端点 | `POST /auth/oidc/callback` 用 code + verifier 换到本服务令牌；认证中心的 access_token / refresh_token **不出服务端** |
 
-> 「被 nx 自己的鉴权拦下」在这里是**好结果**：它证明请求完整穿过了
-> server → WS → client 半 → nx，而拦它的是 nx 那层（L3），不是桥。
+> 「被被桥服务自己的鉴权拦下」在这里是**好结果**：它证明请求完整穿过了
+> server → WS → client 半 → 目标服务，而拦它的是目标服务那层（L3），不是桥。
 
 ---
 

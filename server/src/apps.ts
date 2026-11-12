@@ -1,19 +1,35 @@
 import net from 'node:net';
 
 /**
- * 可桥接应用（app）表与探测。
+ * 可桥接应用（app）的标识、路由与探测。
+ *
+ * ## mn-ws 是**通用 HTTP 桥**，不是某个服务家族的附属
+ *
+ * 本模块**不认识任何具体服务**：没有内置应用表，没有默认端口表。
+ * 一个「应用」在本项目里只有三样东西：
+ *
+ *   名字（路由标识）  基址（http://127.0.0.1:9999）  标题（给人看的名字）
+ *
+ * 这三样**全部由 client 半登记**（命令行 `--apps` / 面板上的动态注册），
+ * server 半只从注册帧里学到它们。它不需要知道被桥的是什么 ——
+ * 桥的是 KV 清单中枢、仓库中枢，还是一个临时起的调试服务，对它没有区别。
+ *
+ * 之所以要这样切：**「服务长什么样」是业务侧的事，「怎么把 HTTP 桥出去」
+ * 是桥的事。**把某个服务族的名字、端口、用法写进桥的发行包，等于让桥背上
+ * 别人的业务知识 —— 那个族一改版，桥就得跟着改；而桥的价值恰恰在于
+ * 能桥任何东西。
  *
  * ## 为什么要有「应用标识」
  *
- * 一台机器上跑着十几个 nx 服务（nx-kv / nx-rh / nx-sk …），每个占一个端口。
- * 桥接要替它们**共用同一条对外的 HTTP 入口**，就必须能区分「这个请求该去
- * 哪个本地端口」——那就是**应用标识（app）**。
+ * 一台机器上跑着多个 HTTP 服务，每个占一个端口。桥接要替它们
+ * **共用同一条对外的 HTTP 入口**，就必须能区分「这个请求该去哪个本地
+ * 端口」—— 那就是**应用标识（app）**。
  *
  * ## 标识怎么带
  *
  * 两种都支持，**路径前缀优先**：
- *   ① `POST /nx-kv/api/todo/add`      → app=nx-kv, path=/api/todo/add
- *   ② `POST /api/todo/add` + 头 `X-Nx-App: nx-kv` → app=nx-kv, path=/api/todo/add
+ *   ① `POST /my-api/api/todo/add`      → app=my-api, path=/api/todo/add
+ *   ② `POST /api/todo/add` + 头 `X-Mn-Ws-App: my-api` → app=my-api, path=/api/todo/add
  *
  * 路径优先的理由：客户端零改造（curl 直接打）、自定义头不会被中间反代剥掉、
  * 且一个请求只可能对应一个 app（没有「路径说 A、头说 B」的歧义）。
@@ -25,35 +41,13 @@ import net from 'node:net';
  */
 
 /** 请求头：应用标识的备用载体。 */
-export const APP_HEADER = 'x-nx-app';
-
-/** 已知 app 的元信息。 */
-export interface KnownApp {
-  title: string;
-  port: number;
-}
+export const APP_HEADER = 'x-mn-ws-app';
 
 /**
- * 已知 nx 服务（2026-11-12 实测各仓 core/paths.js 的 DEFAULT_PORT）。
+ * app 名的合法形态：小写字母开头，只含小写字母/数字/连字符。
  *
- * **这不是白名单** —— 它只是「本机可能有什么」的提示与兜底默认值。
- * 真正能不能桥，由 client half 的配置（--apps / 配置文件）决定：
- * 端口探测只用来显示状态，**绝不因为「扫到端口在监听」就自动开桥**。
+ * 它要当**路由标识**用（路径前缀 / X-Mn-Ws-App 头），所以必须是合法标识符。
  */
-export const KNOWN_APPS: Record<string, KnownApp> = {
-  'nx-rh': { title: '仓库与 Skill 中枢', port: 7800 },
-  'nx-rp': { title: '外部上下文', port: 7820 },
-  'nx-sk': { title: '个人资源与密钥', port: 7866 },
-  'nx-ft': { title: '前端资源管理', port: 7869 },
-  'nx-kv': { title: 'KV 清单中枢', port: 7877 },
-  'nx-nx': { title: '项目生成器', port: 7880 },
-  'nx-kn': { title: 'Obsidian 知识库', port: 7881 },
-  'nx-ditto': { title: 'ditto', port: 7883 },
-  'nx-pg': { title: '画布工作台', port: 7888 },
-  'nx-pn': { title: 'pn', port: 4561 },
-};
-
-/** app 名的合法形态：小写字母开头，只含小写字母/数字/连字符。 */
 export const APP_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
 /**
@@ -68,9 +62,18 @@ export const RESERVED_PATH_SEGMENTS: ReadonlySet<string> = new Set([
   'files', 'assets', 'static', 'docs', 'favicon.ico',
 ]);
 
-/** app 的本地基址覆盖（--app-map 解析结果）。 */
-export interface AppOverrides {
-  [app: string]: { base: string };
+/**
+ * 一个**已登记**的应用：名字 + 本地基址 + 标题。
+ *
+ * 「登记」是 client 半的职责（配置文件 / 命令行 / 面板动态注册）。
+ */
+export interface AppEntry {
+  /** 路由标识 */
+  app: string;
+  /** 本地基址，如 http://127.0.0.1:9999 */
+  base: string | null;
+  /** 显示名（目录里给人看）；不给就用名字兜底 */
+  title?: string;
 }
 
 /** 扫描结果里的一条。 */
@@ -92,17 +95,18 @@ export function isValidAppName(name: unknown): boolean {
 }
 
 /**
- * 解析一个 app 的本地基址。
+ * 从基址里取出端口。
  *
- * 优先用配置里给的 base；没给就用已知端口兜底。
- * 返回 null 表示这个 app 没有可用的本地端口。
+ * 基址是唯一的事实来源 —— 端口是基址的一部分，不是另填的一张表。
  */
-export function baseOf(app: string, overrides?: AppOverrides | null): string | null {
-  const over = overrides && overrides[app];
-  if (over && over.base) return over.base;
-  const known = KNOWN_APPS[app];
-  if (!known) return null;
-  return `http://127.0.0.1:${known.port}`;
+export function portOfBase(base: string | null | undefined): number | null {
+  if (!base) return null;
+  try {
+    const p = Number(new URL(base).port || '');
+    return Number.isFinite(p) && p > 0 ? p : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -130,29 +134,23 @@ export function probePort(host: string, port: number, timeoutMs = 400): Promise<
 }
 
 /**
- * 扫描本机各已知 app 的端口，返回可桥接清单（含存活状态）。
+ * 扫描一批**已登记**的应用，返回存活状态。
  *
- * 注意返回的是「候选清单」——**能不能桥由配置决定**，这里只提供事实。
+ * 注意返回的是「事实」——**能不能桥由白名单决定**，这里只提供状态。
+ * 扫到端口在监听也**绝不自动开桥**：那等于把整台机器暴露出去。
  */
 export async function scanApps({
   host = '127.0.0.1',
-  apps = null,
-  overrides = null,
-}: { host?: string; apps?: string[] | null; overrides?: AppOverrides | null } = {}): Promise<ScannedApp[]> {
-  const names = apps && apps.length ? apps : Object.keys(KNOWN_APPS);
+  entries = [],
+}: { host?: string; entries?: AppEntry[] } = {}): Promise<ScannedApp[]> {
   const out: ScannedApp[] = [];
-  for (const app of names) {
-    const base = baseOf(app, overrides);
-    const known = KNOWN_APPS[app];
-    let port: number | null = known ? known.port : null;
-    if (!port && base) {
-      try { port = Number(new URL(base).port || '') || null; } catch { port = null; }
-    }
-    const alive = port ? await probePort(host, Number(port)) : false;
+  for (const e of entries) {
+    const port = portOfBase(e.base);
+    const alive = port ? await probePort(host, port) : false;
     out.push({
-      app,
-      title: known ? known.title : app,
-      base,
+      app: e.app,
+      title: (e.title || '').trim() || e.app,
+      base: e.base,
       port,
       alive,
     });
@@ -199,37 +197,27 @@ export interface AppDescriptor {
   base: string | null;
   port: number | null;
   title: string;
-  known: boolean;
 }
 
 /**
  * 描述一个可桥接应用的元信息。
  *
- * client half 注册时把这份元信息一并报给 server half，server 把它汇总成
+ * client 半注册时把这份元信息一并报给 server 半，server 把它汇总成
  * **元信息目录**（catalog）—— 远端客户端登录后先拉目录，看到「哪些能路由、
  * 各自是什么」，再决定调哪个。
  *
  * @param app   应用名（路由标识，必须匹配 APP_NAME_RE）
- * @param base  本地基址，如 http://127.0.0.1:7877
+ * @param base  本地基址，如 http://127.0.0.1:9999
  * @param title 客户端自报的标题。**给了就用它的** ——
- *   client 半知道「这个端口是我自己起的、叫什么」，server 不该替它猜。
- *   不给才回落到已知表，再不给就用应用名兜底。
+ *   client 半知道「这个名字是我自己起的、叫什么」，server 不该替它猜，
+ *   更不该替它猜一个「默认叫什么」。
  */
 export function describeApp(app: string, base: string | null, title?: string): AppDescriptor {
-  const known = KNOWN_APPS[app] || null;
-  let port: number | null = null;
-  try {
-    port = base ? Number(new URL(base).port || '') || null : null;
-  } catch {
-    port = null;
-  }
-  const label = (title || '').trim();
   return {
     app,
     base,
-    port: port || (known ? known.port : null),
-    title: label || (known ? known.title : app),
-    known: !!known,
+    port: portOfBase(base),
+    title: (title || '').trim() || app,
   };
 }
 
@@ -246,7 +234,7 @@ export function resolveApp(
   const segs = String(pathname || '/').split('/').filter(Boolean);
   const first = segs[0];
 
-  // ① 路径前缀：第一段就是已知/声明过的 app 名（且不是服务自身的保留段）
+  // ① 路径前缀：第一段就是声明过的 app 名（且不是服务自身的保留段）
   let pathApp: string | null = null;
   if (first !== undefined && isValidAppName(first) && !RESERVED_PATH_SEGMENTS.has(first)) {
     pathApp = first;

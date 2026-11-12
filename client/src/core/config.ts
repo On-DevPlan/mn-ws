@@ -17,17 +17,13 @@ import path from 'node:path';
  */
 
 /**
- * 一个**自定义应用**：不在已知服务表里的本机服务。
+ * 一个**已登记的应用**：名字 + 本地基址 + 标题。
  *
- * 为什么要它：已知表（KNOWN_APPS）只覆盖 nx 系列。用户自己起的服务
- * （一个临时 API、一个调试中的服务、换了端口的 nx）不在表里，
- * 但它同样可以被桥出去 —— 只要在面板上给它起个名字和端口。
- *
- * 名字必须匹配 APP_NAME_RE（小写字母开头 + 小写字母/数字/连字符）：
- * 它要当**路由标识**用（路径前缀 / X-Nx-App 头），必须是合法标识符。
+ * mn-ws 是通用 HTTP 桥，**不认识任何具体服务** —— 「桥的是什么」由使用者
+ * 登记（命令行 `--apps` / 面板上的动态注册），桥只管把它按名字路由出去。
  */
 export interface CustomApp {
-  /** 路由标识：远端用 `X-Nx-App: <name>` 或路径前缀 `/<name>/...` 命中它 */
+  /** 路由标识：远端用 `X-Mn-Ws-App: <name>` 或路径前缀 `/<name>/...` 命中它 */
   name: string;
   /** 本地基址，如 http://127.0.0.1:9999 */
   base: string;
@@ -49,11 +45,15 @@ export interface ClientConfig {
   account: string;
   /** 白名单：应用名 */
   apps: string[];
-  /** 白名单：本地端口（从已知表反查应用名） */
-  ports: number[];
-  /** 白名单：显式指定基址 */
-  appOverrides: Record<string, { base: string }>;
-  /** 运行时动态注册的自定义应用（面板里加的） */
+  /**
+   * 已登记应用的显式基址（名字 -> {base, title?}）。
+   *
+   * 这是「登记表」的一部分：白名单里只有名字的应用，要在这里（或在
+   * customApps 里）才有基址 —— 没有基址就不知道该把请求转到哪个端口，
+   * 那个应用会被跳过并明确报出来。
+   */
+  appOverrides: Record<string, { base: string; title?: string }>;
+  /** 运行时动态注册的应用（面板里加的） */
   customApps: CustomApp[];
   /** 本地面板端口 */
   webPort: number;
@@ -197,36 +197,60 @@ export function httpBaseFromWs(wsUrl: string): string {
   }
 }
 
-/** --apps "nx-kv,nx-rh" → ['nx-kv','nx-rh']；空 → []（= 不限，但实际仍需显式配置才开桥）。 */
-export function parseApps(v: unknown): string[] {
-  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
-  if (!v) return [];
-  return String(v).split(',').map((x) => x.trim()).filter(Boolean);
+/**
+ * --apps "a,b=http://127.0.0.1:9999" → { names: ['a','b'], overrides: {b:{base}} }
+ *
+ * 两种写法都认：只给名字（基址在别处登记），或直接把基址带上。
+ * 直接带基址是常用形态 —— 一条命令把「桥什么」和「桥到哪」一起说清；
+ * 而「名字」本身只是个路由标识，它不携带任何关于被桥服务的信息。
+ */
+export function parseApps(v: unknown): { names: string[]; overrides: Record<string, { base: string }> } {
+  const names: string[] = [];
+  const overrides: Record<string, { base: string }> = {};
+  const items = Array.isArray(v) ? v.map((x) => String(x)) : (v ? String(v).split(',') : []);
+  for (const raw of items) {
+    const s = String(raw).trim();
+    if (!s) continue;
+    const eq = s.indexOf('=');
+    if (eq > 0) {
+      const name = s.slice(0, eq).trim();
+      const base = s.slice(eq + 1).trim();
+      if (name && base) {
+        names.push(name);
+        overrides[name] = { base };
+      }
+      continue;
+    }
+    names.push(s);
+  }
+  return { names, overrides };
 }
 
 /**
- * --ports "7877,7800" → [7877, 7800]
+ * --app-map "a=http://127.0.0.1:9999" → { a: { base: '...' } }
  *
- * 「本地 client 端选择可以开放的端口」——按端口选比按应用名选更贴近
- * 用户的心智：他看到的是「nx-kv 跑在 7877」，不是「nx-kv 这个名字」。
+ * 也可以直接给对象（配置文件里就是对象形态）：`{"a":{"base":"…","title":"…"}}`。
  */
-export function parsePorts(v: unknown): number[] {
-  if (Array.isArray(v)) return v.map((x) => Number(x)).filter((n) => Number.isFinite(n));
-  if (!v) return [];
-  return String(v).split(',')
-    .map((x) => Number(x.trim()))
-    .filter((n) => Number.isFinite(n) && n > 0);
-}
-
-/**
- * --app-map "nx-kv=http://127.0.0.1:7877" → { 'nx-kv': { base: '...' } }
- *
- * 为什么需要它：已知端口表只是**兜底默认值**，真实部署常改端口
- * （换机、端口冲突、容器映射）。让用户能显式覆盖，比让程序去猜端口靠谱。
- */
-export function parseAppMap(v: unknown): Record<string, { base: string }> {
-  const out: Record<string, { base: string }> = {};
+export function parseAppMap(v: unknown): Record<string, { base: string; title?: string }> {
+  const out: Record<string, { base: string; title?: string }> = {};
   if (!v) return out;
+
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      const name = String(k).trim();
+      if (!name) continue;
+      if (val && typeof val === 'object') {
+        const base = String((val as { base?: unknown }).base ?? '').trim();
+        const title = String((val as { title?: unknown }).title ?? '').trim();
+        if (base) out[name] = title ? { base, title } : { base };
+      } else {
+        const base = String(val ?? '').trim();
+        if (base) out[name] = { base };
+      }
+    }
+    return out;
+  }
+
   for (const pair of String(v).split(',')) {
     const s = pair.trim();
     if (!s) continue;
@@ -270,6 +294,10 @@ export function loadClientConfig(flags: Record<string, unknown> = {}): ClientCon
   const file = readConfigFile();
   const env = process.env;
 
+  // --apps 既可以只给名字，也可以带上基址（a=http://127.0.0.1:9999）
+  const parsedApps = parseApps(pick(flags.apps, env.MN_WS_APPS, file.apps, ''));
+  const parsedMap = parseAppMap(pick(flags.appMap, env.MN_WS_APP_MAP, file.appOverrides, ''));
+
   const cfg: ClientConfig = {
     url: str(pick(flags.url, env.MN_WS_URL, file.url, 'ws://1.94.101.189:7777/ws')),
     serverHttp: str(pick(flags.serverHttp, env.MN_WS_SERVER_HTTP, file.serverHttp, '')),
@@ -277,9 +305,9 @@ export function loadClientConfig(flags: Record<string, unknown> = {}): ClientCon
     clientId: str(pick(flags.clientId, env.MN_WS_CLIENT_ID, file.clientId, '')),
     deviceName: str(pick(flags.deviceName, env.MN_WS_DEVICE_NAME, file.deviceName, os.hostname())),
     account: str(pick(flags.account, env.MN_WS_ACCOUNT, file.account, '')),
-    apps: parseApps(pick(flags.apps, env.MN_WS_APPS, file.apps, '')),
-    ports: parsePorts(pick(flags.ports, env.MN_WS_PORTS, file.ports, '')),
-    appOverrides: parseAppMap(pick(flags.appMap, env.MN_WS_APP_MAP, '', '')),
+    apps: parsedApps.names,
+    // --app-map 覆盖 --apps 里内联的基址（更具体的在后）
+    appOverrides: { ...parsedApps.overrides, ...parsedMap },
     customApps: parseCustomApps(file.customApps),
     webPort: Number(pick(flags.webPort, env.MN_WS_WEB_PORT, file.webPort, 7777)),
     webHost: str(pick(flags.webHost, env.MN_WS_WEB_HOST, file.webHost, '127.0.0.1')),
@@ -517,7 +545,7 @@ export function saveCustomApps(list: CustomApp[]): { changed: boolean; file: str
   const next: Record<string, unknown> = { ...existing, customApps: clean };
 
   // 自定义应用的名字并进白名单（去重、保序）
-  const names = parseApps(existing.apps);
+  const names = parseApps(existing.apps).names;
   for (const a of clean) {
     if (!names.includes(a.name)) names.push(a.name);
   }

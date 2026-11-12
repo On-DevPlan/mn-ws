@@ -56,7 +56,7 @@ export const HOP_BY_HOP_HEADERS: ReadonlySet<string> = new Set([
 /**
  * 请求头里必须**剥离**的头：
  *   · hop-by-hop —— 描述的是某一次连接，不该跨代理
- *   · Origin     —— nx-kv 的跨站防护只放行本机来源，透传浏览器 Origin 会 403
+ *   · Origin     —— 很多服务的同源防护只放行本机来源，透传浏览器 Origin 会 403
  *   · X-Mn-Ws-Token —— **mn-ws 自己的 L1 凭据**，属于桥接层内部事务，
  *     泄给目标服务等于把门禁令牌交出去
  */
@@ -77,7 +77,7 @@ export const STRIP_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
   'content-length',
 ]);
 
-/** 请求体上限（字节）。与 nx-kv 的 24MB 对齐；base64 后约 32MB。 */
+/** 请求体上限（字节）。24MB 上限，base64 后约 32MB 帧。 */
 export const MAX_BODY_BYTES = 24 * 1024 * 1024;
 
 /** 单个 HTTP 请求在 server 半的最长等待时间（毫秒）。 */

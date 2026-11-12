@@ -96,7 +96,7 @@ export default function App() {
           <img src="/logo-rounded.png" alt="" />
           {appName}
           <span className="ver-tag">{boot ? `v${boot.app.version}` : ''}</span>
-          <span className="sub">{boot?.app?.description || 'HTTP 与 WebSocket 双向桥的客户端半：把本机 nx 服务桥给远端 HTTP 客户端'}</span>
+          <span className="sub">{boot?.app?.description || 'HTTP 与 WebSocket 双向桥的客户端半：把本机的 HTTP 服务桥给远端 HTTP 客户端'}</span>
         </div>
         <nav>
           {flat.map((v) => (

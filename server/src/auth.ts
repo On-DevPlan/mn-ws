@@ -191,6 +191,63 @@ export class AuthHub {
   // ==================== 身份 ====================
 
   /**
+   * 用**授权码 + PKCE verifier** 换身份。
+   *
+   * 与 mn-rt 的 server/src/auth.js 同构：换码这件事在**服务端**做，
+   * 认证中心那张 access_token / refresh_token 一次都不出服务端 ——
+   * 客户端拿到的是本服务自己签的凭据。
+   *
+   * ⚠️ 换码用的 client_id 必须是 **client 半的身份**（loginClientId），
+   * 不是 server 半那个：授权码是在铸码那一步按 client_id 绑定的，
+   * 换的时候必须用同一个 id，否则认证中心直接判 invalid_grant。
+   *
+   * 之所以要「服务端换码」而不是「客户端换码再把 access_token 送回来」：
+   * 后者会让一枚指向整个平台身份的高价值凭据流经手机 —— 截获即账号接管。
+   */
+  async exchange({ code, codeVerifier, redirectUri }: { code: string; codeVerifier: string; redirectUri?: string }): Promise<{
+    userId: string; sub: string; email: string; name: string; preferredUsername: string;
+  }> {
+    if (!this.enabled) throw Object.assign(new Error('统一登录未启用'), { code: 'disabled' });
+    if (!code || !codeVerifier) throw Object.assign(new Error('缺少 code / codeVerifier'), { code: 'bad_request' });
+
+    const doc = await this.discover();
+    const form = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: this.loginClientId || this.clientId,
+      redirect_uri: redirectUri || this.redirectUri,
+      code_verifier: codeVerifier,
+    });
+
+    const tok = (await this._fetchJson(doc.token_endpoint || `${this.issuer}/oauth2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+    })) as Record<string, unknown> | null;
+
+    if (!tok || tok.error) {
+      const err = tok && tok.error ? String(tok.error) : 'unknown';
+      const desc = tok && tok.error_description ? String(tok.error_description) : '';
+      throw Object.assign(new Error(`换 token 被拒: ${err} ${desc}`.trim()), { code: err });
+    }
+    if (!tok.access_token) throw Object.assign(new Error('令牌响应缺少 access_token'), { code: 'no_access_token' });
+
+    // 让认证中心自己断言身份。用完即弃：这枚 access_token 不进任何存储。
+    const ui = (await this._fetchJson(doc.userinfo_endpoint || `${this.issuer}/oauth2/userinfo`, {
+      headers: { Authorization: `Bearer ${tok.access_token}` },
+    })) as Record<string, unknown> | null;
+    if (!ui || !ui.sub) throw Object.assign(new Error('userinfo 未返回 sub'), { code: 'no_sub' });
+
+    return {
+      userId: String(ui.sub),
+      sub: String(ui.sub),
+      email: ui.email ? String(ui.email) : '',
+      name: ui.name ? String(ui.name) : '',
+      preferredUsername: ui.preferred_username ? String(ui.preferred_username) : '',
+    };
+  }
+
+  /**
    * 校验一枚**认证中心**的 access_token，返回身份。
    *
    * 与 mn-rt 的分工一致：exchange 是"我有 code，服务器你帮我换"，

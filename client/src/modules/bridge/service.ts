@@ -1,4 +1,4 @@
-import { scanApps, KNOWN_APPS } from 'mn-ws-server/apps';
+import { scanApps } from 'mn-ws-server/apps';
 
 import type { MnWsController } from '../../core/controller.js';
 import { readConfigFile, writeConfigFile, saveCustomApps, CUSTOM_APP_NAME_RE, type CustomApp } from '../../core/config.js';
@@ -25,8 +25,10 @@ export interface BridgeStatusView {
 export interface BridgeAppsView {
   /** 白名单里的应用 + 端口存活 */
   configured: { app: string; title: string; port: number | null; base: string | null; alive: boolean; custom: boolean }[];
-  /** 本机已知但不在白名单里的（供面板勾选） */
-  candidates: { app: string; title: string; port: number; alive: boolean }[];
+  /** 已登记但不在白名单里的（供面板勾选） */
+  candidates: { app: string; title: string; port: number | null; alive: boolean }[];
+  /** 在白名单里、但没有登记基址的应用（被跳过了，要说清楚） */
+  missing: string[];
 }
 
 /** 远端目录视图。 */
@@ -55,34 +57,52 @@ export function bridgeStatus(c: MnWsController): BridgeStatusView {
   };
 }
 
-/** 可桥接应用清单：白名单 + 端口存活探测 + 候选项。 */
+/**
+ * 可桥接应用清单：白名单 + 端口存活探测 + 候选项。
+ *
+ * mn-ws 不认识任何具体服务，所以「候选项」来自**已登记但还没进白名单**的条目
+ * —— 而不是一个内置应用表。登记在哪、叫什么、跑在哪个端口，全是使用者说的。
+ */
 export async function bridgeApps(c: MnWsController): Promise<BridgeAppsView> {
-  const { apps: whitelist, titles } = c.resolveApps();
+  const { apps: whitelist, titles, missing } = c.resolveApps();
   const names = Object.keys(whitelist);
   const overrides = c.cfg.appOverrides;
 
-  const configured = (await scanApps({ host: '127.0.0.1', apps: names, overrides })).map((a) => ({
+  const configured = (await scanApps({
+    host: '127.0.0.1',
+    entries: names.map((app) => ({ app, base: whitelist[app] ?? null, title: titles[app] })),
+  })).map((a) => ({
     ...a,
     title: titles[a.app] || a.title,
     custom: !!(c.cfg.customApps || []).find((x) => x.name === a.app),
   }));
 
-  // 候选项：已知表里没进白名单的（面板据此勾选）
-  const rest = Object.keys(KNOWN_APPS).filter((a) => !names.includes(a));
-  const scanned = await scanApps({ host: '127.0.0.1', apps: rest, overrides });
-  const candidates = scanned
-    .filter((x) => x.port !== null)
-    .map((x) => ({ app: x.app, title: x.title, port: x.port as number, alive: x.alive }));
+  // 候选项：已登记（appOverrides / customApps）但没进白名单的 —— 面板据此勾选
+  const registered = new Map<string, { app: string; base: string | null; title?: string }>();
+  for (const [name, o] of Object.entries(overrides || {})) {
+    if (o && o.base) registered.set(name, { app: name, base: o.base, title: o.title });
+  }
+  for (const a of c.cfg.customApps || []) {
+    registered.set(a.name, { app: a.name, base: a.base, title: a.title });
+  }
+  const rest = [...registered.values()].filter((e) => !names.includes(e.app));
+  const scanned = await scanApps({ host: '127.0.0.1', entries: rest });
+  const candidates = scanned.map((x) => ({
+    app: x.app,
+    title: x.title,
+    port: x.port,
+    alive: x.alive,
+  }));
 
-  return { configured, candidates };
+  return { configured, candidates, missing };
 }
 
 /**
- * 动态注册一个**自定义应用**（不在已知服务表里的本机服务）。
+ * 动态登记一个应用（本机的任意一个 HTTP 服务）。
  *
  * 这条是「运行时开放端口」的落点：用户起了一个临时服务（或某个服务换了端口），
  * 在面板上给它起个名字和端口，它就进了白名单，随注册帧上报给 server 半，
- * 别的客户端从目录里看到之后用 `X-Nx-App: <名字>` 就能打过来。
+ * 别的客户端从目录里看到之后用 `X-Mn-Ws-App: <名字>` 就能打过来。
  *
  * 名字要当**路由标识**用（小写字母开头 + 小写字母/数字/连字符），
  * 基址要么给端口（默认本机回环），要么给完整 URL。
@@ -165,30 +185,28 @@ function restartBridge(c: MnWsController): boolean {
 /** 设置白名单。落盘并让运行中的桥按新白名单重注册。 */
 export async function setWhitelist(
   c: MnWsController,
-  input: { apps: string[]; ports: number[]; appMap: Record<string, { base: string }> },
+  input: { apps: string[]; appMap: Record<string, { base: string; title?: string }> },
 ): Promise<{ ok: boolean; apps: string[]; applied: boolean }> {
-  if (!input.apps.length && !input.ports.length && !Object.keys(input.appMap).length) {
+  if (!input.apps.length && !Object.keys(input.appMap).length) {
     // 不给任何东西 = 清空白名单（= 一个都不桥）。这是有意的：
     // 「清空白名单」必须是一个能表达的动作，不能靠「什么都不传」来暗示。
     const raw = readConfigFile();
     delete raw.apps;
     delete raw.ports;
     delete raw.appMap;
+    delete raw.appOverrides;
     writeConfigFile(raw);
     c.cfg.apps = [];
-    c.cfg.ports = [];
     c.cfg.appOverrides = {};
     return { ok: true, apps: [], applied: true };
   }
 
   const raw = readConfigFile();
   raw.apps = input.apps;
-  raw.ports = input.ports;
   raw.appMap = input.appMap;
   writeConfigFile(raw);
 
   c.cfg.apps = input.apps;
-  c.cfg.ports = input.ports;
   c.cfg.appOverrides = input.appMap;
 
   // 运行中的桥要按新白名单重注册：停掉再起，让 server 半收到新的 app 表
@@ -245,7 +263,7 @@ export function renderStatus(r: BridgeStatusView): string {
 export function renderApps(r: BridgeAppsView): string {
   const lines = ['可桥接的应用（白名单）'];
   if (!r.configured.length) {
-    lines.push('  （白名单为空 —— 一个都不桥。用 mn-ws apps set --apps nx-kv,nx-rh 设置）');
+    lines.push('  （白名单为空 —— 一个都不桥。用 mn-ws apps set --apps my-api 设置）');
   } else {
     for (const a of r.configured) {
       lines.push(`  ${a.app.padEnd(10)} ${String(a.port ?? '—').padEnd(7)} ${a.alive ? '✓ 在监听' : '✗ 未运行'}  ${a.base || ''}`);

@@ -12,7 +12,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 import {
-  loadClientConfig, parseApps, parsePorts, parseAppMap, httpBaseFromWs,
+  loadClientConfig, parseApps, parseAppMap, httpBaseFromWs,
   withAccounts, listAccounts, saveAuthAccount, switchActiveAccount,
   clearAuthCredentials, entryKeyOf, labelOf, isExpired, pick, isEnvTruthy,
 } from '../../src/core/config.js';
@@ -73,12 +73,18 @@ test('配置：默认端口 7777，clientId 自动生成并持久化', () => {
   });
 });
 
-test('解析：apps / ports / app-map', () => {
-  assert.deepEqual(parseApps('nx-kv,nx-rh'), ['nx-kv', 'nx-rh']);
-  assert.deepEqual(parseApps(''), []);
-  assert.deepEqual(parsePorts('7877,7800'), [7877, 7800]);
-  assert.deepEqual(parsePorts('abc'), []);
-  assert.deepEqual(parseAppMap('nx-kv=http://127.0.0.1:7999'), { 'nx-kv': { base: 'http://127.0.0.1:7999' } });
+test('解析：apps（可带基址）/ app-map', () => {
+  const plain = parseApps('my-api,other-api');
+  assert.deepEqual(plain.names, ['my-api', 'other-api']);
+  assert.deepEqual(plain.overrides, {});
+
+  // 名字 + 基址内联：一条命令把「桥什么」和「桥到哪」一起说清
+  const withBase = parseApps('my-api,other-api=http://127.0.0.1:7999');
+  assert.deepEqual(withBase.names, ['my-api', 'other-api']);
+  assert.deepEqual(withBase.overrides, { 'other-api': { base: 'http://127.0.0.1:7999' } });
+
+  assert.deepEqual(parseApps('').names, []);
+  assert.deepEqual(parseAppMap('my-api=http://127.0.0.1:7999'), { 'my-api': { base: 'http://127.0.0.1:7999' } });
   assert.deepEqual(parseAppMap('bad'), {});
 });
 
@@ -157,29 +163,32 @@ test('authorize URL 用的是 client 半的身份', () => {
   assert.equal(url.searchParams.get('client_id'), 'mn-ws-client');
 });
 
-test('白名单：--apps / --ports / --app-map 都能定出桥哪些 app', () => {
+test('白名单：--apps 里的名字 + --app-map 的基址定出桥哪些 app', () => {
   withTempHome(() => {
-    const c = new MnWsController(loadClientConfig({ apps: 'nx-kv', ports: '7877' }));
-    const { apps, unknownPorts } = c.resolveApps();
-    assert.ok('nx-kv' in apps);
-    assert.equal(apps['nx-kv'], 'http://127.0.0.1:7877');
-    assert.deepEqual(unknownPorts, []);
+    const c = new MnWsController(loadClientConfig({ apps: 'my-api', appMap: 'my-api=http://127.0.0.1:7877' }));
+    const { apps, missing } = c.resolveApps();
+    assert.ok('my-api' in apps);
+    assert.equal(apps['my-api'], 'http://127.0.0.1:7877');
+    assert.deepEqual(missing, []);
   });
 });
 
-test('白名单：端口不在已知表 → 记下来，不静默忽略', () => {
+test('白名单：--apps 里内联基址，一步就能把应用登记好', () => {
   withTempHome(() => {
-    const c = new MnWsController(loadClientConfig({ ports: '9999' }));
-    const { apps, unknownPorts } = c.resolveApps();
+    const c = new MnWsController(loadClientConfig({ apps: 'my-api=http://127.0.0.1:7877' }));
+    const { apps, missing } = c.resolveApps();
+    assert.equal(apps['my-api'], 'http://127.0.0.1:7877');
+    assert.deepEqual(missing, []);
+  });
+});
+
+test('白名单：没登记基址 → 记下来，不静默忽略', () => {
+  withTempHome(() => {
+    // mn-ws 不认识任何具体服务：名字只是路由标识，没有基址就没有落点
+    const c = new MnWsController(loadClientConfig({ apps: 'my-api' }));
+    const { apps, missing } = c.resolveApps();
     assert.deepEqual(Object.keys(apps), []);
-    assert.deepEqual(unknownPorts, [9999]);
-  });
-});
-
-test('白名单：--app-map 覆盖已知端口', () => {
-  withTempHome(() => {
-    const c = new MnWsController(loadClientConfig({ apps: 'nx-kv', appMap: 'nx-kv=http://127.0.0.1:7999' }));
-    assert.equal(c.resolveApps().apps['nx-kv'], 'http://127.0.0.1:7999');
+    assert.deepEqual(missing, ['my-api']);
   });
 });
 

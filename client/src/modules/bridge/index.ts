@@ -2,18 +2,18 @@
 //
 // 这一域回答的是「这台桥现在什么状态、能桥什么、桥给谁了」：
 //   - status    连没连、注册了哪些 app、重连到第几次
-//   - apps      本机有哪些 nx 服务在跑（探测端口存活）+ 白名单是哪些
+//   - apps      本机登记了哪些应用（探测端口存活）+ 白名单是哪些
 //   - whitelist 改白名单（**白名单说了算**：探测到端口在监听 ≠ 可以桥）
 //   - catalog   拉远端 server 半的元信息目录（哪些能路由）
 //   - start/stop 启停桥
 //
 // 每一项都同时暴露为 CLI 与 HTTP —— 面板上的按钮与命令行是同一份声明。
-import { scanApps, KNOWN_APPS } from 'mn-ws-server/apps';
+import { scanApps } from 'mn-ws-server/apps';
 
 import { defineAction } from '../../runtime/types/action.js';
 import { defineModule } from '../../runtime/types/module.js';
 import { getController } from '../../core/controller.js';
-import { parseApps } from '../../core/config.js';
+import { parseApps, parseAppMap } from '../../core/config.js';
 import {
   bridgeStatus, bridgeApps, setWhitelist, remoteCatalog, addCustomApp, removeCustomApp,
   renderStatus, renderApps, renderWhitelist,
@@ -51,22 +51,17 @@ export default defineModule({
       http: ['POST', '/api/bridge/whitelist'],
       summary: '设置白名单（只有列出的应用会被桥；不给就一个都不桥）',
       flags: {
-        apps: { type: 'string', hint: '逗号分隔的应用名，如 nx-kv,nx-rh' },
-        ports: { type: 'string', hint: '逗号分隔的本地端口（从已知表反查应用名）' },
-        'app-map': { type: 'string', hint: '显式基址，如 nx-kv=http://127.0.0.1:7999' },
+        apps: { type: 'string', hint: '逗号分隔的应用名（可带基址），如 my-api,other=http://127.0.0.1:7999' },
+        'app-map': { type: 'string', hint: '显式基址，如 my-api=http://127.0.0.1:7999' },
       },
     })(
       async (ctx) => {
-        const apps = parseApps(ctx.apps);
-        const ports = String(ctx.ports || '')
-          .split(',').map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
-        const appMap = String(ctx['app-map'] || '')
-          .split(',').map((x) => x.trim()).filter(Boolean)
-          .map((pair) => {
-            const eq = pair.indexOf('=');
-            return eq <= 0 ? null : [pair.slice(0, eq).trim(), { base: pair.slice(eq + 1).trim() }] as const;
-          }).filter((x): x is readonly [string, { base: string }] => x !== null);
-        return setWhitelist(getController(), { apps, ports, appMap: Object.fromEntries(appMap) });
+        const parsed = parseApps(ctx.apps);
+        const appMap = {
+          ...parsed.overrides,
+          ...parseAppMap(String(ctx['app-map'] || '')),
+        };
+        return setWhitelist(getController(), { apps: parsed.names, appMap });
       },
       (r) => renderWhitelist(r),
     ),
@@ -75,7 +70,7 @@ export default defineModule({
       id: 'bridge.apps.add',
       cli: ['apps', 'add'],
       http: ['POST', '/api/bridge/apps/add'],
-      summary: '动态注册一个自定义应用（不在已知表里的本机服务）：名字 + 端口',
+      summary: '动态登记一个应用（本机的任意 HTTP 服务）：名字 + 端口',
       args: [{ name: 'name', required: true }],
       flags: {
         port: { type: 'number', hint: '本机端口（默认 127.0.0.1）' },
@@ -132,7 +127,7 @@ export default defineModule({
       id: 'bridge.stop',
       cli: ['bridge', 'stop'],
       http: ['POST', '/api/bridge/stop'],
-      summary: '停桥（断开 server 半，本机 nx 服务不受影响）',
+      summary: '停桥（断开 server 半，本机的 HTTP 服务不受影响）',
     })(
       () => getController().stop(),
       (r) => (r.stopped ? '已停桥' : `未停：${r.reason || ''}`),
@@ -142,10 +137,20 @@ export default defineModule({
       id: 'bridge.known',
       cli: ['apps', 'known'],
       http: ['GET', '/api/bridge/known'],
-      summary: '列出已知的 nx 服务与它们的默认端口',
+      summary: '列出**已登记**的应用（名字 / 基址 / 标题）',
     })(
-      () => Object.entries(KNOWN_APPS).map(([app, info]) => ({ app, port: info.port, title: info.title })),
-      (rows) => rows.map((r) => `  ${r.app.padEnd(10)} ${String(r.port).padEnd(7)} ${r.title}`).join('\n'),
+      () => {
+        const c = getController();
+        const seen = new Map<string, { app: string; base: string; title: string }>();
+        for (const [name, o] of Object.entries(c.cfg.appOverrides || {})) {
+          if (o && o.base) seen.set(name, { app: name, base: o.base, title: o.title || name });
+        }
+        for (const a of c.cfg.customApps || []) {
+          seen.set(a.name, { app: a.name, base: a.base, title: a.title || a.name });
+        }
+        return [...seen.values()];
+      },
+      (rows) => rows.map((r) => `  ${r.app.padEnd(12)} ${r.base.padEnd(24)} ${r.title}`).join('\n'),
     ),
   ],
 });

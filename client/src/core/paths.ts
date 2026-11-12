@@ -7,7 +7,7 @@ import type { SafeRelPath } from './brand.js';
 // ---- 项目标识（生成时由模板变量替换）----
 export const APP_NAME = 'mn-ws';
 export const APP_TITLE = 'mn-ws';
-export const APP_DESC = 'HTTP 与 WebSocket 双向桥的客户端半：把本机 nx 服务桥给远端 HTTP 客户端';
+export const APP_DESC = 'HTTP 与 WebSocket 双向桥的客户端半：把本机的 HTTP 服务桥给远端 HTTP 客户端';
 
 // ---- 数据目录（用户主目录下，可用环境变量覆盖）----
 export const APP_DIR = join(homedir(), '.mn-ws');

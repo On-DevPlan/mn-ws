@@ -11,7 +11,7 @@
  * 用法：
  *   set MN_WS_E2E_URL=http://1.94.101.189:7777
  *   set MN_WS_E2E_TOKEN=<门禁 token>
- *   set MN_WS_E2E_APP=nx-kv            # 被桥的应用，默认 nx-kv
+ *   set MN_WS_E2E_APP=my-api            # 被桥的应用，默认 my-api
  *   node test/e2e-remote.js
  *
  * 令牌从环境变量读，**不进命令行** —— 命令行会进 shell 历史。
@@ -21,7 +21,7 @@ const http = require('node:http');
 
 const BASE = (process.env.MN_WS_E2E_URL || 'http://1.94.101.189:7777').replace(/\/+$/, '');
 const TOKEN = process.env.MN_WS_E2E_TOKEN || '';
-const APP = process.env.MN_WS_E2E_APP || 'nx-kv';
+const APP = process.env.MN_WS_E2E_APP || 'my-api';
 
 let passed = 0;
 let failed = 0;
@@ -84,7 +84,7 @@ function req(path, headers = {}) {
     `status=${viaPrefix.status} body=${viaPrefix.body.slice(0, 120)}`);
 
   // ② 请求头路由（路径原样）
-  const viaHeader = await req('/api/ping', { 'X-Nx-App': APP });
+  const viaHeader = await req('/api/ping', { 'X-Mn-Ws-App': APP });
   check('请求头路由到应用', viaHeader.status === 200,
     `status=${viaHeader.status} body=${viaHeader.body.slice(0, 120)}`);
 

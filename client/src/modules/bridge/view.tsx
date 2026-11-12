@@ -69,9 +69,8 @@ export default function BridgeView() {
   const selected = new Set(configured.map((c) => c.app));
 
   // ── 动态注册表单 ──────────────────────────────────────────────────
-  // 「运行时开放端口」：已知表（KNOWN_APPS）里没有的服务也能被桥出去 ——
-  // 给它起个名字和端口，它就进白名单，随注册帧上报给 server 半，
-  // 别的客户端从目录里看到之后用 X-Nx-App 就能打过来。
+  // 「运行时开放端口」：给本机任意一个 HTTP 服务起个名字和端口，它就进白名单，
+  // 随注册帧上报给 server 半，别的客户端从目录里看到之后用 X-Mn-Ws-App 就能打过来。
   const [newName, setNewName] = useState('');
   const [newPort, setNewPort] = useState('');
   const [newTitle, setNewTitle] = useState('');
@@ -191,7 +190,7 @@ export default function BridgeView() {
         <div className="colhead">
           白名单
           <span className="right muted">
-            CLI 等价：<code>mn-ws apps set --apps nx-kv,nx-rh</code>
+            CLI 等价：<code>mn-ws apps set --apps my-api,other=http://127.0.0.1:7800</code>
           </span>
         </div>
         <div style={{ padding: 12 }} className="stack">
@@ -219,7 +218,7 @@ export default function BridgeView() {
 
           {candidates.length > 0 && (
             <div className="stack">
-              <div className="muted">本机在跑、还没桥：</div>
+              <div className="muted">已登记、还没桥：</div>
               {candidates.map((a) => (
                 <label key={a.app} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                   <input
@@ -229,7 +228,7 @@ export default function BridgeView() {
                     onChange={(e) => { void toggle(a.app, e.target.checked); }}
                   />
                   <span>
-                    {a.app} <span className="muted">{a.port}</span> {a.title}
+                    {a.app} <span className="muted">{a.port ?? '—'}</span> {a.title}
                   </span>
                 </label>
               ))}
@@ -264,7 +263,7 @@ export default function BridgeView() {
         </div>
       </div>
 
-      {/* 动态注册：把不在已知表里的本机服务也开放出来 */}
+      {/* 动态注册：把本机任意一个 HTTP 服务开放出来 */}
       <div className="card">
         <div className="colhead">
           动态注册
@@ -274,9 +273,10 @@ export default function BridgeView() {
         </div>
         <div style={{ padding: 12 }} className="stack">
           <div className="muted">
-            已知表里没有的服务也能被桥出去：给它起个**路由标识**（小写字母开头，
-            只含小写字母/数字/连字符）和端口，它就进白名单，随注册帧上报给 server 半 ——
-            别的客户端从目录里看到之后，用 <code>X-Nx-App: &lt;名字&gt;</code> 就能打过来。
+            mn-ws 不认识任何具体服务 —— 要桥什么，由你在这儿登记：给它起一个**路由标识**
+            （小写字母开头，只含小写字母/数字/连字符）和端口，它就进白名单，
+            随注册帧上报给 server 半 —— 别的客户端从目录里看到之后，
+            用 <code>X-Mn-Ws-App: &lt;名字&gt;</code> 就能打过来。
           </div>
           <div className="toolbar">
             <input

@@ -1,5 +1,3 @@
-import { KNOWN_APPS } from 'mn-ws-server/apps';
-
 import { WsBridgeClient, type BridgeStatus } from './bridge.js';
 import { SessionManager } from './session.js';
 import { loadClientConfig, type ClientConfig } from './config.js';
@@ -19,10 +17,10 @@ import { loadClientConfig, type ClientConfig } from './config.js';
 export interface ResolvedApps {
   /** app -> base */
   apps: Record<string, string>;
-  /** app -> 标题（自定义应用才有；已知应用的标题在 KNOWN_APPS 里） */
+  /** app -> 标题（登记时给了才有；没给就用名字兜底） */
   titles: Record<string, string>;
-  /** 端口反查不到应用名时的提示 */
-  unknownPorts: number[];
+  /** 在白名单里、但**没有登记基址**的应用名 —— 它们被跳过了 */
+  missing: string[];
 }
 
 export class MnWsController {
@@ -41,61 +39,54 @@ export class MnWsController {
   /**
    * 解析白名单 → { app -> base }。
    *
-   * **白名单说了算**：只有 --apps / --ports / --app-map / 面板添加的自定义应用
-   * 才会被桥。端口探测只用来显示状态，**绝不因为「扫到端口在监听」就自动开桥** ——
-   * 扫到就开桥等于把整台机器暴露出去。
+   * **白名单说了算**：只有被登记（--apps / 配置文件 / 面板动态注册）且
+   * 在白名单里的应用才会被桥。端口探测只用来显示状态，
+   * **绝不因为「扫到端口在监听」就自动开桥** —— 扫到就开桥等于把
+   * 整台机器暴露出去。
    *
-   * 三类来源合成一份：
-   *   ① 已知服务（KNOWN_APPS）—— 按名字或按端口反查
-   *   ② 显式基址（--app-map）—— 端口改了、容器映射等
-   *   ③ **自定义应用**（面板上动态注册的）—— 已知表里根本没有的服务
+   * 两类登记合成一份：
+   *   ① 显式基址（--apps name=base / --app-map / 配置文件 appOverrides）
+   *   ② 面板上动态登记的条目（customApps）—— 登记即进白名单
+   *
+   * mn-ws **不认识任何具体服务**：这里没有内置应用表，名字只是路由标识。
+   * 白名单里有、但没登记基址的应用会被跳过，并在 `missing` 里报出来 ——
+   * 静默跳过会让人以为「桥了但不通」。
    */
   resolveApps(): ResolvedApps {
     const wanted = new Set(this.cfg.apps || []);
-    const unknownPorts: number[] = [];
 
-    // 按端口反查应用名
-    for (const port of this.cfg.ports || []) {
-      const hit = Object.entries(KNOWN_APPS).find(([, info]) => info.port === port);
-      if (hit) wanted.add(hit[0]);
-      else unknownPorts.push(port);
+    // 登记表：名字 -> {base, title}
+    const registry = new Map<string, { base: string; title?: string }>();
+
+    for (const [name, o] of Object.entries(this.cfg.appOverrides || {})) {
+      if (o && o.base) registry.set(name, { base: o.base, title: o.title });
     }
-
-    // 自定义应用：名字直接进白名单。
+    // 面板上动态登记的条目：登记即进白名单。
     // ⚠️ 「是不是自定义」与「标题是什么」是两件事，不能共用一个 Map ——
     //    没有标题的自定义应用曾因此被当成「不在表里」而整个丢掉。
-    const customNames = new Set<string>();
-    const custom = new Map<string, string>();
     for (const a of this.cfg.customApps || []) {
       wanted.add(a.name);
-      customNames.add(a.name);
-      if (a.title) custom.set(a.name, a.title);
+      registry.set(a.name, { base: a.base, title: a.title });
     }
 
     const apps: Record<string, string> = {};
     const titles: Record<string, string> = {};
+    const missing: string[] = [];
     for (const app of wanted) {
-      const base =
-        (this.cfg.appOverrides[app] && this.cfg.appOverrides[app].base) ||
-        (customNames.has(app) ? this.baseOfCustom(app) : '') ||
-        (KNOWN_APPS[app] ? `http://127.0.0.1:${KNOWN_APPS[app].port}` : '');
-      if (!base) continue;
-      apps[app] = base;
-      const t = custom.get(app);
-      if (t) titles[app] = t;
+      const hit = registry.get(app);
+      if (!hit || !hit.base) {
+        missing.push(app);
+        continue;
+      }
+      apps[app] = hit.base;
+      if (hit.title) titles[app] = hit.title;
     }
-    return { apps, titles, unknownPorts };
-  }
-
-  /** 自定义应用的基址。 */
-  private baseOfCustom(app: string): string {
-    const hit = (this.cfg.customApps || []).find((a) => a.name === app);
-    return hit ? hit.base : '';
+    return { apps, titles, missing };
   }
 
   /** 起桥。已连着就不重复起。 */
   start(): { started: boolean; apps: string[]; reason?: string } {
-    const { apps, titles, unknownPorts } = this.resolveApps();
+    const { apps, titles, missing } = this.resolveApps();
     const names = Object.keys(apps);
     if (!names.length) {
       return { started: false, apps: [], reason: '白名单为空 —— 一个都不桥（用 --apps 指定）' };
@@ -107,15 +98,21 @@ export class MnWsController {
       url: this.cfg.url,
       token: this.session.credential() || this.cfg.token,
       bridgeId: this.cfg.clientId,
-      // 标题一起带上：动态注册的应用没有已知表可查，
-      // 标题是远端目录里唯一能认出它的线索。
+      // 标题一起带上：远端目录里，标题是认出「这个端口上跑的是什么」的唯一线索，
+      // 而只有 client 半知道它叫什么。
       apps: Object.fromEntries(
         Object.entries(apps).map(([name, base]) => [name, { base, title: titles[name] }]),
       ),
       onStatus: (s) => { this.lastStatus = s; },
     });
     this.client.start();
-    return { started: true, apps: names, reason: unknownPorts.length ? `端口未在已知服务表：${unknownPorts.join(', ')}` : undefined };
+    return {
+      started: true,
+      apps: names,
+      reason: missing.length
+        ? `这些应用没有登记基址、已跳过：${missing.join(', ')}`
+        : undefined,
+    };
   }
 
   /** 停桥。 */
