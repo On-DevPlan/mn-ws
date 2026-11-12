@@ -112,7 +112,8 @@ jobs:
           port: ${{ secrets.PORT || 22 }}
           source: "${{ env.TAR_NAME }}"
           target: "~/app/"
-          timeout: 10m
+          # 大镜像 + 跨境链路：默认 5 分钟必爆，这里给 30 分钟
+          timeout: 30m
           rm: true
 
       # ── 部署 ──────────────────────────────────────────────────────────

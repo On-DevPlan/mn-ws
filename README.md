@@ -218,8 +218,18 @@ L1 走独立头 `X-Mn-Ws-Token`，否则两边令牌互相打架 → 401。
 
 ```bash
 npm install
-node test/unit.js       # 协议 + 端到端透传 + 多路复用 + 元信息目录 + 默认端口（34 例）
+node test/unit.js       # 协议 + 端到端透传 + 多路复用 + 元信息目录 + 默认端口（36 例）
 node test/smoke-cli.js  # 真实起两个进程打穿（11 例）
+```
+
+远端验收（打**已部署**的公网 server 半，验「部署完到底能不能用」）：
+
+```bash
+# Windows PowerShell
+$env:MN_WS_E2E_URL = 'http://1.94.101.189:7777'
+$env:MN_WS_E2E_TOKEN = '<门禁 token>'
+$env:MN_WS_E2E_APP = 'nx-kv'
+node test/e2e-remote.js
 ```
 
 设计文档：[docs/design.md](docs/design.md) · 部署手册：[docs/DEPLOY.md](docs/DEPLOY.md)

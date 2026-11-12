@@ -19,6 +19,17 @@ const BIN = path.join(ROOT, 'bin', 'index.js');
 const SERVER_PORT = 18791;
 const GATE = 'smoke-gate-token';
 
+/**
+ * 子进程的配置目录 —— **必须与本机真实配置隔离**。
+ *
+ * 不隔离的后果很具体：本机 `~/.mn-ws/config.json` 里存着用户的门禁 token 时，
+ * 「server 无鉴权时拒绝启动」那条用例会从配置里读到 token → server 真的起来了
+ * → 子进程永不退出 → 整条 run() 永不 resolve → **整个冒烟套件挂死**。
+ *
+ * 这不是"本机配置怪"的问题，是测试必须与开发者机器状态解耦。
+ */
+const SMOKE_HOME = path.join(ROOT, '.tmp-smoke');
+
 function startFakeNx() {
   const server = http.createServer((req, res) => {
     let body = '';
@@ -35,17 +46,38 @@ function startFakeNx() {
   });
 }
 
+/**
+ * 跑一个 CLI 子进程，等它退出。
+ *
+ * 两个必须做到的性质：
+ *   1. **配置隔离** —— MN_WS_HOME 指向临时目录，读不到本机真实配置（见 SMOKE_HOME 注释）
+ *   2. **有兜底超时** —— 子进程不退出就判失败。
+ *      没有超时的话，一条「本该退出却没退出」的用例会把整个套件挂死，
+ *      而"挂死"在 CI 上表现为**任务超时**，看不出是哪条用例出的问题。
+ */
 function run(args, opts = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [BIN, ...args], {
       cwd: ROOT,
-      env: { ...process.env, ...(opts.env || {}) },
+      env: { ...process.env, MN_WS_HOME: SMOKE_HOME, ...(opts.env || {}) },
     });
     let out = '';
     let err = '';
+    let settled = false;
+    let timer = null;
+    const finish = (code, extraErr) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ code, out, err: extraErr ? `${err}${extraErr}` : err });
+    };
     child.stdout.on('data', (c) => { out += c.toString(); });
     child.stderr.on('data', (c) => { err += c.toString(); });
-    child.on('close', (code) => resolve({ code, out, err }));
+    child.on('close', (code) => finish(code, ''));
+    timer = setTimeout(() => {
+      try { child.kill(); } catch { /* ignore */ }
+      finish(-1, `\n[超时] 子进程「${args.join(' ')}」超过 ${opts.timeoutMs || 20000}ms 未退出`);
+    }, opts.timeoutMs || 20000);
     if (opts.killAfterMs) {
       setTimeout(() => { try { child.kill(); } catch { /* ignore */ } }, opts.killAfterMs);
     }

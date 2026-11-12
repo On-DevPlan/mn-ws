@@ -7,6 +7,14 @@
   },
   "main": "lib/index.js",
   "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/On-DevPlan/mn-ws.git"
+  },
+  "homepage": "https://github.com/On-DevPlan/mn-ws#readme",
+  "bugs": {
+    "url": "https://github.com/On-DevPlan/mn-ws/issues"
+  },
   "files": [
     "bin/",
     "lib/",
@@ -17,7 +25,9 @@
   "scripts": {
     "start": "node bin/index.js client",
     "server": "node bin/index.js server",
-    "test": "node test/unit.js"
+    "test": "node test/unit.js",
+    "test:smoke": "node test/smoke-cli.js",
+    "test:e2e": "node test/e2e-remote.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

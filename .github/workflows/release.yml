@@ -1,15 +1,20 @@
 # Release —— 打附注 tag 即发版到 npm。
 #
 # 流程：push 一个 vX.Y.Z 附注 tag → 校验 tag 与 package.json 版本一致 →
-#        npm publish → 建 GitHub Release（自动生成附注）。
+#        跑测试 → npm publish（带 provenance 签名）→ 建 GitHub Release。
 #
 # 为什么 tag 必须与 package.json 版本一致：
 #   npm 上同一个版本号**永远只能发一次**（重发报 E403 "cannot publish over"）。
 #   如果 tag 写 v0.1.0 而 package.json 是 0.0.9，那这次发出去的版本号
 #   和 tag 对不上，以后想补发就得跳号。宁可在流水线里当场失败。
 #
+# 为什么带 --provenance：
+#   公开仓库上 setup-node@v4 自动通过 OIDC 提供签名身份，npmjs 页面会显示
+#   Sigstore 徽章。不需要任何额外配置，但**要求 package.json 有 repository 字段**
+#   （缺了会直接失败）。
+#
 # Secrets:
-#   NPM_TOKEN —— npm 发布令牌（nx-sk 的 secret 栏目里有）
+#   NPM_TOKEN —— npm 发布令牌（Automation 类型，永久不过期、绕过 2FA）
 #
 # 手动发版：Actions 里选本 workflow → Run workflow（用 package.json 里已有的版本号）
 
@@ -23,6 +28,8 @@ on:
 
 permissions:
   contents: write
+  # provenance 签名要用 OIDC 换短期身份凭证 —— 少了这行 --provenance 会失败
+  id-token: write
 
 jobs:
   publish:
@@ -32,6 +39,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tag 检测要完整历史
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -63,8 +72,39 @@ jobs:
           node test/unit.js
           node test/smoke-cli.js
 
+      # 幂等检查：同一个版本号只能发一次，重复触发要能安全跳过
+      - name: 检查该版本是否已发布（幂等）
+        id: npm_check
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+
+          if npm view "$NAME@$VER" version >/dev/null 2>&1; then
+            echo "published=true" >> $GITHUB_OUTPUT
+            echo "$NAME@$VER 已在 npm 上，跳过发布"
+            exit 0
+          fi
+
+          # 组织走「分阶段发布」：首次发布会被换成一个 0.0.0-stage 占位版，
+          # 真实版本由发布流水线稍后提升（实测约 1-3 分钟）。
+          # 此时**绝对不能再发一次** —— 同版本号在 npm 上只能存在一份，
+          # 重复提交会拿到 E403 甚至把占位版顶掉。
+          # 所以：包已存在且带占位版 = 已提交，等提升即可。
+          if npm view "$NAME" versions --json 2>/dev/null | grep -q '0.0.0-stage'; then
+            echo "published=true" >> $GITHUB_OUTPUT
+            echo "$NAME 处于分阶段发布中（占位版已存在），跳过重复发布，等提升即可"
+            exit 0
+          fi
+
+          echo "published=false" >> $GITHUB_OUTPUT
+          echo "$NAME@$VER 未发布，继续"
+
       - name: 发布到 npm
-        run: npm publish --access public
+        if: steps.npm_check.outputs.published == 'false'
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
