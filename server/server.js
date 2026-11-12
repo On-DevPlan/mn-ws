@@ -45,7 +45,9 @@ function createServer(userConfig = {}) {
     wsPath: '/ws',
     token: '',
     issuer: 'http://47.110.80.47:8082',
-    idpClientId: 'mn-ws',
+    idpClientId: 'mn-ws-server',
+    // client 半的身份：真正发起授权码流程的是它
+    loginClientId: 'mn-ws-client',
     redirectUri: '',
     jwtSecret: '',
     authEnabled: false,
@@ -63,6 +65,7 @@ function createServer(userConfig = {}) {
     enabled: config.authEnabled,
     issuer: config.issuer,
     clientId: config.idpClientId,
+    loginClientId: config.loginClientId,
     redirectUri: config.redirectUri,
     jwtSecret: config.jwtSecret,
     dataDir: config.dataDir,

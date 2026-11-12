@@ -92,6 +92,8 @@ jobs:
           MN_WS_JWT_SECRET_LEN: ${{ secrets.MN_WS_JWT_SECRET }}
           MN_WS_AUTH_ENABLED_VAL: ${{ secrets.MN_WS_AUTH_ENABLED }}
           MN_WS_ISSUER_VAL: ${{ secrets.MN_WS_ISSUER }}
+          MN_WS_IDP_CLIENT_ID_VAL: ${{ secrets.MN_WS_IDP_CLIENT_ID }}
+          MN_WS_LOGIN_CLIENT_ID_VAL: ${{ secrets.MN_WS_LOGIN_CLIENT_ID }}
         run: |
           echo "HOST length: ${#HOST_LEN}"
           echo "USERNAME length: ${#USERNAME_LEN}"
@@ -101,6 +103,9 @@ jobs:
           echo "MN_WS_JWT_SECRET length: ${#MN_WS_JWT_SECRET_LEN} (0=未配，签不出设备令牌)"
           echo "MN_WS_AUTH_ENABLED: '${MN_WS_AUTH_ENABLED_VAL:-<未配>}' (认 1/true/yes/on 与 0/false/no/off)"
           echo "MN_WS_ISSUER: '${MN_WS_ISSUER_VAL:-<未配>}'"
+          # 两端在认证中心各有各的 client_id（审计与吊销按端分开）
+          echo "MN_WS_IDP_CLIENT_ID (server 半): '${MN_WS_IDP_CLIENT_ID_VAL:-<未配, 回落 mn-ws-server>}'"
+          echo "MN_WS_LOGIN_CLIENT_ID (client 半): '${MN_WS_LOGIN_CLIENT_ID_VAL:-<未配, 回落 mn-ws-client>}'"
 
       # ── 传输 ──────────────────────────────────────────────────────────
       - name: Copy tarball to server
@@ -125,12 +130,13 @@ jobs:
           MN_WS_AUTH_ENABLED: ${{ secrets.MN_WS_AUTH_ENABLED || '' }}
           MN_WS_ISSUER: ${{ secrets.MN_WS_ISSUER || '' }}
           MN_WS_IDP_CLIENT_ID: ${{ secrets.MN_WS_IDP_CLIENT_ID || '' }}
+          MN_WS_LOGIN_CLIENT_ID: ${{ secrets.MN_WS_LOGIN_CLIENT_ID || '' }}
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.PORT || 22 }}
-          envs: MN_WS_TOKEN,MN_WS_JWT_SECRET,MN_WS_AUTH_ENABLED,MN_WS_ISSUER,MN_WS_IDP_CLIENT_ID
+          envs: MN_WS_TOKEN,MN_WS_JWT_SECRET,MN_WS_AUTH_ENABLED,MN_WS_ISSUER,MN_WS_IDP_CLIENT_ID,MN_WS_LOGIN_CLIENT_ID
           timeout: 30s
           command_timeout: 30m
           script: |
@@ -184,6 +190,7 @@ jobs:
               ${MN_WS_AUTH_ENABLED:+-e MN_WS_AUTH_ENABLED="$MN_WS_AUTH_ENABLED"} \
               ${MN_WS_ISSUER:+-e MN_WS_ISSUER="$MN_WS_ISSUER"} \
               ${MN_WS_IDP_CLIENT_ID:+-e MN_WS_IDP_CLIENT_ID="$MN_WS_IDP_CLIENT_ID"} \
+              ${MN_WS_LOGIN_CLIENT_ID:+-e MN_WS_LOGIN_CLIENT_ID="$MN_WS_LOGIN_CLIENT_ID"} \
               "${IMAGE}"
 
             # ── 部署后必须验一次「配了的确实生效了」────────────────────────

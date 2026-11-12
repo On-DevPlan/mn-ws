@@ -81,6 +81,8 @@ node bin/index.js client --url ws://127.0.0.1:7777/ws --token dev --apps nx-kv
 --apps <a,b,c>          只桥接这些应用（白名单；不给就一个都不桥）
 --ports <p,q>           只桥接这些本地端口（从已知表反查应用名）
 --app-map <a=url,...>   指定应用的本地基址（如 nx-kv=http://127.0.0.1:7999）
+--idp-client-id <id>    server 半在认证中心的身份（默认 mn-ws-server）
+--login-client-id <id>  client 半在认证中心的身份（默认 mn-ws-client）
 --device-name <名>      桥的显示名
 --no-open               auth login 只打印授权地址、不弹浏览器
 --insecure              server 允许无鉴权启动（**仅限本机自测**）
@@ -200,6 +202,27 @@ L1 走独立头 `X-Mn-Ws-Token`，否则两边令牌互相打架 → 401。
 | 吊销 | 可单独吊销 | 换密钥才算换 |
 | 建议 | **生产用这个** | 仅自测 / 单人使用 |
 
+### 两端各有各的 client_id
+
+统一登录走 go-ah（auth-hub）。mn-ws 在那里登记了**两个**客户端：
+
+| client_id | 是谁 | 回调白名单 | 干什么 |
+|---|---|---|---|
+| `mn-ws-client` | **client 半**（本机 CLI） | `http://127.0.0.1:*/callback`、`http://localhost:*/callback` | 真正发起授权码流程：CLI 在本机回环随机端口收码，自己做 PKCE 换 token |
+| `mn-ws-server` | **server 半**（公网机） | `http://127.0.0.1:7777/auth/callback` | server 半自己的身份（审计与吊销按端分开） |
+
+**为什么拆**：client_id 是**审计与吊销的单元**。共用一个之后，「哪个平台在发 token」
+「要停哪条接入」都问不出来（go-ah 自己的种子注释里写的就是这条理由）。
+
+server 半通过 `GET /auth/oidc/config` 把 `loginClientId` 一并发布出来，
+所以新装的 client 半**不需要额外配置**就知道该用哪个 client_id 去登录。
+
+> `mn-ws-server` 目前**还没有走通的授权码流程** —— server 半只做
+> `verifyBearer`（拿 access_token 调认证中心的 userinfo 换身份），
+> 不发起授权码流程，所以它登记的回调地址现在还收不到码。
+> 这与 mn-rt「服务端自己的浏览器回调还没实现」是同一种状态：
+> 先占住身份与审计单元，等真要用时再把那条路走通。
+
 ---
 
 ## 安全
@@ -218,7 +241,7 @@ L1 走独立头 `X-Mn-Ws-Token`，否则两边令牌互相打架 → 401。
 
 ```bash
 npm install
-node test/unit.js       # 协议 + 端到端透传 + 多路复用 + 元信息目录 + 默认端口（36 例）
+node test/unit.js       # 协议 + 端到端透传 + 多路复用 + 元信息目录 + 默认端口 + 两端身份（40 例）
 node test/smoke-cli.js  # 真实起两个进程打穿（11 例）
 ```
 

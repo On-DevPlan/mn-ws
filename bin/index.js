@@ -28,6 +28,8 @@
  *   --no-open             auth login 只打印授权地址、不弹浏览器
  *   --insecure            server 允许无鉴权启动（**仅限本机自测**）
  *   --auth-enabled <bool> 显式开/关统一登录（默认跟随「配没配 MN_WS_JWT_SECRET」）
+ *   --idp-client-id <id>  server 半在认证中心的身份（默认 mn-ws-server）
+ *   --login-client-id <id> client 半在认证中心的身份（默认 mn-ws-client）
  *   --log-level <level>   debug | info | warn | error
  *   --help / --version
  */
@@ -99,6 +101,8 @@ ${C.bold}选项${C.reset}
   --no-open              auth login 只打印授权地址、不弹浏览器
   --insecure             server 允许无鉴权启动（仅限本机自测）
   --auth-enabled <bool>  显式开/关统一登录（1/true/yes/on 与 0/false/no/off）
+  --idp-client-id <id>   server 半在认证中心的身份（默认 mn-ws-server）
+  --login-client-id <id> client 半在认证中心的身份（默认 mn-ws-client）
   --log-level <level>    debug | info | warn | error（默认 info）
   --help                 显示帮助
   --version              显示版本
@@ -206,6 +210,7 @@ async function cmdServer(cfg) {
     token: cfg.token,
     issuer: cfg.issuer,
     idpClientId: cfg.idpClientId,
+    loginClientId: cfg.loginClientId,
     redirectUri: cfg.redirectUri || `http://127.0.0.1:${cfg.port}/auth/callback`,
     jwtSecret: cfg.jwtSecret,
     authEnabled: wantAuth,

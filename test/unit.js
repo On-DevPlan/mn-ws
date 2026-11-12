@@ -402,7 +402,8 @@ async function testDiscoveryWarmUp() {
     authEnabled: true,
     jwtSecret: 'test-jwt-secret',
     issuer: `http://127.0.0.1:${idpPort}`,
-    idpClientId: 'mn-ws-test',
+    idpClientId: 'mn-ws-server',
+    loginClientId: 'mn-ws-client',
     dataDir: null,
     logLevel: 'error',
   });
@@ -420,7 +421,8 @@ async function testDiscoveryWarmUp() {
     assert.ok(cfg, '没拿到 /auth/oidc/config');
     assert.strictEqual(cfg.enabled, true);
     assert.strictEqual(cfg.idpAvailable, true, JSON.stringify(cfg));
-    assert.strictEqual(cfg.clientId, 'mn-ws-test');
+    assert.strictEqual(cfg.clientId, 'mn-ws-server');
+    assert.strictEqual(cfg.loginClientId, 'mn-ws-client');
   });
 
   await test('公开配置里绝不含 secret', async () => {
@@ -431,6 +433,77 @@ async function testDiscoveryWarmUp() {
 
   await server.close();
   await new Promise((r) => idp.close(r));
+}
+
+// ============================ OIDC 两端身份拆分 ============================
+
+/**
+ * server 半与 client 半在认证中心各有各的 client_id。
+ *
+ * 为什么拆：client_id 是**审计与吊销的单元**。共用一个之后，
+ * 「哪个平台在发 token」「要停哪条接入」都问不出来
+ * （go-ah 自己的种子注释里写的就是这条理由）。
+ *
+ * 拆开之后：
+ *   · server 半 = mn-ws-server（它只是「我是谁」，不发起授权码流程）
+ *   · client 半 = mn-ws-client（真正发起授权码流程：本机 CLI 回环收码 + PKCE）
+ * 而且 server 半要**把 client 半的身份一并发布出去**，否则新装的 client 半
+ * 不知道该用哪个 client_id 去登录。
+ */
+async function testOidcIdentitySplit() {
+  group('OIDC 两端身份拆分');
+
+  await test('默认：server 半 = mn-ws-server，client 半 = mn-ws-client', () => {
+    const cfg = require('../lib/config');
+    assert.strictEqual(cfg.loadConfig({}).idpClientId, 'mn-ws-server');
+    assert.strictEqual(cfg.loadConfig({}).loginClientId, 'mn-ws-client');
+    assert.strictEqual(createServer({}).config.idpClientId, 'mn-ws-server');
+    assert.strictEqual(createServer({}).config.loginClientId, 'mn-ws-client');
+  });
+
+  await test('/auth/oidc/config 同时发布两个身份', async () => {
+    const server = createServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'gate',
+      authEnabled: true,
+      jwtSecret: 'test-jwt-secret',
+      idpClientId: 'mn-ws-server',
+      loginClientId: 'mn-ws-client',
+      dataDir: null,
+      logLevel: 'error',
+    });
+    const port = await server.listen();
+    try {
+      const res = await httpGet(`http://127.0.0.1:${port}/auth/oidc/config`);
+      const cfg = JSON.parse(res.body);
+      assert.strictEqual(cfg.clientId, 'mn-ws-server');
+      assert.strictEqual(cfg.loginClientId, 'mn-ws-client');
+    } finally {
+      await server.close();
+    }
+  });
+
+  await test('authorize 用的是 client 半的身份（不是 server 半的）', () => {
+    const { buildAuthorizeUrl } = require('../lib/auth');
+    const url = new URL(buildAuthorizeUrl({
+      issuer: 'http://idp.example',
+      clientId: 'mn-ws-server',
+      loginClientId: 'mn-ws-client',
+      scopes: ['openid'],
+    }, { state: 's', nonce: 'n', authorizeParams: { redirect_uri: 'http://127.0.0.1:1/callback' } }));
+    assert.strictEqual(url.searchParams.get('client_id'), 'mn-ws-client');
+  });
+
+  await test('老 server 只发布一个 client_id 时回落用它', () => {
+    const { buildAuthorizeUrl } = require('../lib/auth');
+    const url = new URL(buildAuthorizeUrl({
+      issuer: 'http://idp.example',
+      clientId: 'mn-ws',
+      scopes: ['openid'],
+    }, { state: 's', nonce: 'n', authorizeParams: { redirect_uri: 'http://127.0.0.1:1/callback' } }));
+    assert.strictEqual(url.searchParams.get('client_id'), 'mn-ws');
+  });
 }
 
 // ============================ 多路复用 + 元信息目录 ============================
@@ -594,6 +667,7 @@ function httpReq(method, url, body, headers = {}) {
   await testProtocol();
   await testPortGuard();
   await testDefaultPort();
+  await testOidcIdentitySplit();
   await testDiscoveryWarmUp();
   await testEndToEnd();
   await testMultiplex();

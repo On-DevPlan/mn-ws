@@ -374,6 +374,33 @@ client 半：pendingLocal.set(id, req) → 收到 abort 时销毁对应 req
 > **L1 与 L3 的关系**：L1 管「谁能用这个桥」，L3 管「这个请求在 nx 眼里是谁」。
 > 两者都要有。**只有 L3 没有 L1** = 公网裸奔；**只有 L1 没有 L3** = 一个 token 通吃所有 nx 数据。
 
+### 8.1 两端在认证中心各有各的 client_id
+
+统一登录走 go-ah（auth-hub）。mn-ws 在那里登记了**两个**客户端：
+
+| client_id | 是谁 | 回调白名单 | 干什么 |
+|---|---|---|---|
+| `mn-ws-client` | **client 半**（本机 CLI） | `http://127.0.0.1:*/callback`、`http://localhost:*/callback` | 真正发起授权码流程 |
+| `mn-ws-server` | **server 半**（公网机） | `http://127.0.0.1:7777/auth/callback` | server 半自己的身份 |
+
+**为什么拆成两个，而不像 mn-rt 那样共用一个**：
+client_id 是**审计与吊销的单元**（go-ah 自己的种子注释里写的就是这条理由）。
+共用一个之后，「哪个平台在发 token」「要停哪条接入」都问不出来。
+mn-ws 的两端分处公网与内网，吊销诉求本来就不一样。
+
+**谁用哪个**：
+- server 半通过 `GET /auth/oidc/config` 同时发布 `clientId`（自己）与
+  `loginClientId`（client 半的）。新装的 client 半因此**不需要额外配置**。
+- client 半登录时用 `loginClientId` 发起 authorize 与换 token；
+  服务端没发布这个字段时回落 `clientId`（兼容老的 server）。
+
+**当前状态（不要误读）**：
+今天只有 `mn-ws-client` 有**走通的授权码流程**。
+`mn-ws-server` 是「先占住身份与审计单元」—— server 半只做 `verifyBearer`
+（拿 access_token 调认证中心的 userinfo 换身份），userinfo **不校验 client_id**，
+所以 server 半并不需要自己的 client 才能工作；它登记的回调地址现在还收不到码。
+这与 mn-rt「服务端自己的浏览器回调还没实现」是同一种状态。
+
 ---
 
 ## 9. 透明性契约（「体感一致」的机器化定义）
@@ -424,6 +451,8 @@ client 半：pendingLocal.set(id, req) → 收到 abort 时销毁对应 req
 | **K22** | **同机既跑 server 又开面板** | server 默认绑 `0.0.0.0:7777`，面板默认绑 `127.0.0.1:7777` → 后者 EADDRINUSE | 端口预检**明确报错**并提示 `--web-port` 换端口，不静默顺延（顺延 = 两边对不上账）。面板默认端口与 server 相同是有意为之：面板跑在 client 那台机器上，client 连的是远端 server，本机默认不会有 7777 冲突 |
 | **K23** | **`idpAvailable` 的语义是「拉到过」，不是「在线」** | `/auth/oidc/config` 报的 `idpAvailable` = 是否**成功拉取过**发现文档。不做启动预热 → 这个字段永远是 false → 部署脚本据此断言「统一登录生效」→ 把一个完全正常的部署判成失败（认证中心明明可达，容器里 wget 也拉得到，就是没人去拉） | 启动时后台预热发现文档（**失败不固化缓存**，带重试：容器可能比认证中心先起来）；部署脚本对 `idpAvailable` 轮询而不是一上来就判死 |
 | **K24** | **测试读到了本机的真实配置** | 冒烟测试的子进程继承 `process.env`，配置目录默认是 `~/.mn-ws` —— 那里存着用户的门禁 token。于是「server 无鉴权时拒绝启动」那条用例**真的把 server 起了**，子进程永不退出 → `run()` 永不 resolve → **整个套件挂死**，CI 上表现为任务超时，看不出是哪条用例的问题 | 测试子进程一律带 `MN_WS_HOME=<临时目录>`（配置隔离）；`run()` 加兜底超时（子进程不退出就判那条用例失败，而不是拖死整个套件） |
+| **K25** | **一个 client_id 承担两端** | server 半与 client 半共用 `mn-ws` 一个 client_id → 认证中心里**分不清是哪个平台在发 token**，也无法只吊销一端 | 拆成 `mn-ws-server`（server 半的身份）与 `mn-ws-client`（client 半发起授权码流程）；server 半通过 `/auth/oidc/config` 的 `loginClientId` 字段把后者告诉 client，新装的 client 零配置 |
+| **K26** | **认证中心没登记这个 client** | `auth login` 在 authorize 端点被拒：`400 invalid client_id`。表现为「登录点开就报错」，但本地看不出是「没登记」—— 因为它长得像「redirect_uri 不在白名单」 | 登记走 go-ah 的管理 API `POST /api/admin/clients`（公共客户端 + PKCE + 回环通配）；**注意它不是种子**（`template-web-client`/`oidc-cli`/`fr-app`/`mn-rt` 才是），所以重建库时不会自动带上，要重新登记 |
 
 ---
 

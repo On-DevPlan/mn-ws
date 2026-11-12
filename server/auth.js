@@ -38,6 +38,11 @@ class AuthHub {
     this.enabled = opts.enabled === true;
     this.issuer = opts.issuer || '';
     this.clientId = opts.clientId || '';
+    // client 半的身份：真正发起授权码流程的是它（mn-ws-client）。
+    // 与 clientId 分开登记，是为了让 go-ah 侧能**分端审计、分端吊销** ——
+    // client_id 是审计与吊销的单元，共用一个之后「哪个平台在发 token」
+    // 「要停哪条接入」都问不出来。
+    this.loginClientId = opts.loginClientId || '';
     this.redirectUri = opts.redirectUri || '';
     this.scopes = opts.scopes || ['openid', 'profile', 'email'];
     this.jwtSecret = opts.jwtSecret || '';
@@ -64,6 +69,8 @@ class AuthHub {
       enabled: this.enabled,
       issuer: this.issuer,
       clientId: this.clientId,
+      // client 半登录时该用的 client_id。空则回落 clientId（老的 server）。
+      loginClientId: this.loginClientId || this.clientId,
       redirectUri: this.redirectUri,
       scopes: this.scopes,
       authorizationEndpoint: e ? e.authorization_endpoint : `${this.issuer}/oauth2/auth`,

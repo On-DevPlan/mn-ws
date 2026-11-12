@@ -42,8 +42,19 @@ gh secret set MN_WS_TOKEN -b "<随机串>"
 gh secret set MN_WS_JWT_SECRET -b "$(openssl rand -hex 32)"
 gh secret set MN_WS_AUTH_ENABLED -b "1"        # 认 1/true/yes/on
 gh secret set MN_WS_ISSUER -b "http://47.110.80.47:8082"
-gh secret set MN_WS_IDP_CLIENT_ID -b "mn-ws"   # 需在认证中心登记过该 client
+# 两端在认证中心各有各的 client_id（审计与吊销按端分开）
+gh secret set MN_WS_IDP_CLIENT_ID -b "mn-ws-server"     # server 半的身份
+gh secret set MN_WS_LOGIN_CLIENT_ID -b "mn-ws-client"   # client 半的身份
 ```
+
+> **这两个 client_id 必须先在认证中心登记过**，否则 `auth login` 会在
+> authorize 端点被拒（`invalid client_id`）。
+> 登记走 go-ah 的管理 API（`POST /api/admin/clients`，管理员会话），
+> 形状与 `mn-rt` 一致：公共客户端 + PKCE + 回环通配回调。
+> 只登记 DB 的话，**重建库时不会自动带上** —— 与 go-ah 种子里的
+> `template-web-client` / `oidc-cli` / `fr-app` / `mn-rt` 不同，
+> 那几个是写死在 `auth-hub/internal/db/db.go` 的种子里的。
+
 
 > **Windows 上用 PowerShell 设多行 secret（私钥）必须避开管道**：
 > `$content | gh secret set SSH_KEY` 会把私钥里的 `\n` 改写成 `\r\n`，
