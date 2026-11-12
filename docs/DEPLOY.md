@@ -1,0 +1,130 @@
+# mn-ws server 半 部署手册
+
+GitHub Actions 自动部署（`.github/workflows/deploy.yml`）：runner build 镜像 →
+`docker save` → gzip → scp → 服务器 `docker load` → 重启容器 → `/health` 健康检查 →
+断言统一登录开关与部署意图一致。
+
+**镜像不走 GHCR**：服务器 pull ghcr.io 实测很慢（跨境 + GHCR 同步怪现象），
+一次部署的等待时间比传输本身还长。改成镜像直接传 —— 代价是每次部署都传一遍
+（gzip 后 ~40MB），换来的是**部署时间可控**。
+
+---
+
+## 服务器档案
+
+| 项 | 值 |
+|---|---|
+| 主机 | 1.94.101.189（华为云 `hcss-ecs-b2e2`，Ubuntu 24.04 / kernel 6.8，root@22） |
+| 资源 | 2C / 1.7Gi 内存（**长期紧张**）/ Docker 29.1.3 |
+| 端口 | **7777**（mn-ws 默认；与同机 mn-rt 的 8790 不冲突） |
+| 同机已有 | `remotetype_server`（mn-rt，8790）、`dataweb-web-1` / `dataweb-api-1`（80）、`guardian_radar_api`（41901）、`napcat`（已 Exited） |
+| 本机 SSH | `ssh root@1.94.101.189` |
+
+> 7777 在部署前已确认空闲（`ss -ltnp` 只有 8790 在听）。
+
+---
+
+## Secrets 配置（一次性）
+
+仓库属主 **On-DevPlan**，本机 gh 默认认证账号有 `admin:org` 权限，直接写入即可：
+
+```bash
+# SSH 部署凭据
+gh secret set HOST -b "1.94.101.189"
+gh secret set USERNAME -b "root"
+gh secret set PORT -b "22"
+gh secret set SSH_KEY < <私钥文件>
+
+# ── 鉴权（server 无鉴权拒绝启动，这两项至少给一个）──
+# 静态门禁：client 半注册时用 --token 带上
+gh secret set MN_WS_TOKEN -b "<随机串>"
+# 统一登录（推荐）：签设备令牌，按用户隔离
+gh secret set MN_WS_JWT_SECRET -b "$(openssl rand -hex 32)"
+gh secret set MN_WS_AUTH_ENABLED -b "1"        # 认 1/true/yes/on
+gh secret set MN_WS_ISSUER -b "http://47.110.80.47:8082"
+gh secret set MN_WS_IDP_CLIENT_ID -b "mn-ws"   # 需在认证中心登记过该 client
+```
+
+> **Windows 上用 PowerShell 设多行 secret（私钥）必须避开管道**：
+> `$content | gh secret set SSH_KEY` 会把私钥里的 `\n` 改写成 `\r\n`，
+> 私钥解析失败 → 流水线报 `ssh: handshake failed: unable to authenticate`。
+> 用 `Start-Process` 把文件直接接成 stdin，原始字节进：
+> ```powershell
+> Start-Process -FilePath (Get-Command gh).Source `
+>   -ArgumentList @('secret','set','SSH_KEY','--repo','On-DevPlan/mn-ws') `
+>   -RedirectStandardInput 'key_lf.txt' -NoNewWindow -Wait
+> ```
+> 另外 OpenSSH 私钥要求 LF 换行、文件权限收紧（Windows OpenSSH 会拒绝
+> 权限过松的私钥）。
+
+
+> **`MN_WS_AUTH_ENABLED` 开了却不配 `MN_WS_JWT_SECRET` → 容器拒绝启动**（不是降级运行）。
+> 签不出设备令牌 = 统一登录等于没开。
+
+> **`MN_WS_JWT_SECRET` 一旦有设备登录过就别随手换**：设备令牌是它签的 HS256，
+> 换了等于所有已登记客户端下次连接直接 401，必须全体重新 `auth login`。
+
+> **部署后 CI 自己验一遍**（`Pull image and restart` 步骤末尾）：拉
+> `GET /auth/oidc/config`，断言 `enabled` 与本次传入的意图一致，开启时还要
+> `idpAvailable=true`。这步不是装饰 —— 「配了 1 却被当成关闭」会让服务照常起、
+> `/health` 照样绿，而整套按用户隔离的属主判据**静默不存在**。
+> 开关有没有真生效只能问运行中的进程。`idpAvailable` 尤其必须在服务端侧验：
+> 浏览器打得开认证中心不代表容器出得去。
+
+---
+
+## 运行时约定
+
+| 项 | 值 |
+|---|---|
+| 容器 / 镜像 | `mn_ws_server` / `mn-ws-server:latest`（**服务器本地镜像**，不入任何公共仓库） |
+| 端口 | 宿主 7777 → 容器 7777 |
+| 数据卷 | `mn_ws_data:/app/data`（审计 `requests.jsonl` + `mn-ws-server.log`） |
+| 内存上限 | `--memory 256m`（宿主机紧张，防灌包拖垮整机） |
+| 健康检查 | `GET /health` |
+| 统一登录开关 | `GET /auth/oidc/config`（`enabled` / `idpAvailable`，响应永不含 secret） |
+| 镜像 tag | 每次部署打 `:latest` 和 `:${github.sha}` 两个 tag 一起 save/load（后者用于回滚） |
+
+> 审计落盘在 `mn_ws_data` 卷里，**删这个卷 = 审计历史清零**。
+> 设备登记（属主绑定）也在同一卷内，删卷后所有客户端需要重新 `auth login`。
+
+---
+
+## 触发与回滚
+
+- **自动**：push 到 `main` 且改动 `server/**`、`lib/**`、`client/**`、`bin/**`、`package*.json`、`Dockerfile` 或 workflow 本身
+- **手动**：Actions → Deploy → Run workflow（选分支/commit 即可回滚旧 SHA）
+- **服务器上手动**：`docker logs -f mn_ws_server`、`docker ps`
+
+---
+
+## npm 发版
+
+发版走**附注 tag**，与 deploy.yml 无关：
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` 会：校验 tag 与 `package.json` 版本一致 → 跑测试 →
+`npm publish` → 建 GitHub Release。
+
+> **tag 必须与 package.json 版本一致**，否则流水线当场失败。
+> npm 上同一个版本号永远只能发一次，重发报 `E403 cannot publish over` ——
+> 版本号跳了只能跳着补。
+
+---
+
+## 已知风险
+
+- **内存**：宿机 available 常年紧张。容器冷启动可用；若频繁 OOM 重启，
+  优先清理 `napcat` 或加 swap，而不是调大 `--memory`。
+- **镜像传输**：每次部署都传一遍 gzip 后的镜像包（~40MB）。走的是
+  runner → 服务器的跨境 scp，**上传时间与包大小成正比**。
+  相比 GHCR pull 的好处是时间可控（不会卡在 registry 同步怪象上）；
+  代价是没有镜像缓存层，服务器每次都要重新 load。
+  包在服务器上 `docker load` 完立刻 `rm`，不留垃圾。
+- **公网裸奔**：7777 对公网开放，WS 无 TLS。正式使用建议前置 nginx + TLS，
+  或至少确认 `MN_WS_TOKEN` / `MN_WS_JWT_SECRET` 已生效（`/auth/oidc/config` 看 `enabled`）。
+- **认证中心侧的 `mn-ws` client**：统一登录需要在认证中心登记 `client_id=mn-ws`，
+  没登记时 `auth login` 会在换令牌那一步失败（静态门禁路径不受影响）。

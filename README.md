@@ -218,8 +218,34 @@ L1 走独立头 `X-Mn-Ws-Token`，否则两边令牌互相打架 → 401。
 
 ```bash
 npm install
-node test/unit.js       # 协议 + 端到端透传 + 多路复用 + 元信息目录（31 例）
+node test/unit.js       # 协议 + 端到端透传 + 多路复用 + 元信息目录 + 默认端口（34 例）
 node test/smoke-cli.js  # 真实起两个进程打穿（11 例）
 ```
 
-设计文档：[docs/design.md](docs/design.md)
+设计文档：[docs/design.md](docs/design.md) · 部署手册：[docs/DEPLOY.md](docs/DEPLOY.md)
+
+---
+
+## 部署（server 半）
+
+```bash
+# 本地构建镜像
+docker build -f Dockerfile -t mn-ws-server .
+
+# 起服务（没有鉴权会被拒绝启动）
+docker run -d --name mn_ws_server -p 7777:7777 \
+  -e MN_WS_TOKEN=<门禁> -e MN_WS_JWT_SECRET=<随机> \
+  -e MN_WS_AUTH_ENABLED=1 -e MN_WS_ISSUER=http://47.110.80.47:8082 \
+  -v mn_ws_data:/app/data mn-ws-server:latest
+```
+
+线上部署走 GitHub Actions（`.github/workflows/deploy.yml`）：
+push 到 `main` → 构建 → `docker save` + gzip → scp → 服务器 `docker load` → 重启 → 验活。
+**镜像不走 GHCR** —— 服务器 pull 实测太慢，改成镜像直传，部署时间可控。
+
+发版走附注 tag（`.github/workflows/release.yml`）：
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+# → 校验 tag 与 package.json 版本一致 → 跑测试 → npm publish → 建 GitHub Release
+```
