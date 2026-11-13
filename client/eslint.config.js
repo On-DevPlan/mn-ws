@@ -89,9 +89,14 @@ const ACTION_PARITY = {
         const prefixes = opts.cliOnlyPrefixes || ['serve', 'server', 'skill'];
 
         // 读对象里的字面量属性（只认 Identifier / Literal 键，不碰计算属性）
+        //
+        // ⚠️ 属性可能不是 Property —— 展开语法 `...x` 是 SpreadElement，**没有 key**。
+        //    直接读 p.key.type 会在遇到它时崩掉（整个 lint 挂掉，而不是报一条错）。
+        //    所以先挡掉没有 key 的属性再比。
         const propOf = (obj, name) =>
           obj.properties.find(
             (p) =>
+              p.key &&
               !p.computed &&
               ((p.key.type === 'Identifier' && p.key.name === name) ||
                 (p.key.type === 'Literal' && p.key.value === name))
@@ -179,7 +184,16 @@ const LOCAL_RULES = { rules: { ...FILE_SIZE.rules, ...ACTION_PARITY.rules } };
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'src/web/frontend/public/**'],
+    // e2e-remote.cjs 必须保持 CommonJS：client 包写着 "type": "module"，
+    // 写成 .js 会被当 ESM 加载，而这个脚本用 require —— 改成 ESM 会直接跑不起来。
+    // 所以按扩展名忽略它，而不是把 require 改成 import。
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'coverage/**',
+      'src/web/frontend/public/**',
+      '**/*.cjs',
+    ],
   },
 
   // TS / TSX：typescript-eslint 推荐规则集

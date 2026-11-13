@@ -203,16 +203,47 @@ input:focus, select:focus { outline: none; box-shadow: var(--shadow-relief-inset
 /* --- 工具栏 --- */
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
-/* --- CLI 等价提示：面板上每个操作都该配一行 --- */
+/* --- CLI 等价提示：收进「高级」区，默认折叠 ---
+   用户反馈：「具有开发性质的放到一个高级按钮里面即可，用户没必要认识 ws 认识 cli」。
+   命令表是给开发者核对用的，对只想暴露端口的人它是整屏最长的噪音段。
+   所以默认收起，只留一个入口；展开后仍保持原来的排版（可复制、可点）。 */
 .cli-hint {
   color: var(--mid);
   font-size: 11px;
+  border-top: var(--border);
+}
+.cli-hint-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.cli-hint-summary::-webkit-details-marker { display: none; }
+/* 折叠态给一个「可以展开」的暗示（▸），展开态翻成 ▾ */
+.cli-hint-summary::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--mid);
+}
+.cli-hint[open] > .cli-hint-summary::before { content: '▾'; }
+.cli-hint-summary:hover { color: var(--ink); }
+.cli-hint-label { cursor: pointer; }
+.cli-hint-count {
+  border: 1px solid var(--soft-2);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+}
+.cli-hint-body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 2px;
-  padding: 6px 12px;
-  border-top: var(--border);
+  padding: 0 12px 8px 30px;
 }
 .cli-cmd { font-family: ui-monospace, Consolas, monospace; color: var(--ink); }
 

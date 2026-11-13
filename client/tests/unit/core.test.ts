@@ -15,8 +15,8 @@ import {
   loadClientConfig, parseApps, parseAppMap, httpBaseFromWs,
   withAccounts, listAccounts, saveAuthAccount, switchActiveAccount,
   clearAuthCredentials, entryKeyOf, labelOf, isExpired, pick, isEnvTruthy,
-  saveCustomApps,
 } from '../../src/core/config.js';
+import { saveCustomApps } from '../../src/core/apps-registry.js';
 import { createAuthRequest, buildAuthorizeUrl, loginClientIdOf, b64url } from '../../src/core/auth.js';
 import { MnWsController } from '../../src/core/controller.js';
 import { addCustomApp, removeCustomApp } from '../../src/modules/bridge/service.js';

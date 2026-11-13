@@ -76,7 +76,7 @@ export function setApiGate(gate: ApiGate | null): void {
 /** 默认门禁：未登录一律 401，只有「问登录态」与「发起登录」放行。 */
 export function defaultApiGate(isLoggedIn: () => boolean): ApiGate {
   const EXEMPT = new Set(['/api/auth/status', '/api/auth/login/start', '/api/bootstrap']);
-  return (pathname, method) => {
+  return (pathname, _method) => {
     if (EXEMPT.has(pathname)) return null;
     if (isLoggedIn()) return null;
     return { status: 401, error: 'not_logged_in' };

@@ -8,14 +8,12 @@
 //   - start/stop 启停桥
 //
 // 每一项都同时暴露为 CLI 与 HTTP —— 面板上的按钮与命令行是同一份声明。
-import { scanApps } from 'mn-ws-server/apps';
-
 import { defineAction } from '../../runtime/types/action.js';
 import { defineModule } from '../../runtime/types/module.js';
 import { getController } from '../../core/controller.js';
 import { parseApps, parseAppMap } from '../../core/config.js';
 import {
-  bridgeStatus, bridgeApps, setWhitelist, remoteCatalog, addCustomApp, removeCustomApp,
+  bridgeStatus, bridgeApps, setWhitelist, remoteCatalog, addCustomApp, removeCustomApp, reopenFavorite,
   renderStatus, renderApps, renderWhitelist,
   type BridgeStatusView, type BridgeAppsView, type CatalogView,
 } from './service.js';
@@ -96,6 +94,17 @@ export default defineModule({
     })(
       (ctx) => removeCustomApp(getController(), String(ctx.name || '')),
       (r) => (r.ok ? `已移除 ${r.removed} · 现在可桥：${r.apps.join(', ') || '（空）'}` : `移除失败：${r.error}`),
+    ),
+
+    defineAction({
+      id: 'bridge.apps.reopen',
+      cli: ['apps', 'reopen'],
+      http: ['POST', '/api/bridge/apps/reopen'],
+      summary: '重新暴露一个用过的应用（按名字；名字与端口从常用记录里取）',
+      args: [{ name: 'name', required: true }],
+    })(
+      (ctx) => reopenFavorite(getController(), String(ctx.name || '')),
+      (r) => (r.ok ? `已重新暴露 ${r.app}（${r.base}）· 现在可桥：${r.apps.join(', ')}` : `重开失败：${r.error}`),
     ),
 
     defineAction({

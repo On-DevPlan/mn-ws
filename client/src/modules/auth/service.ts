@@ -238,7 +238,7 @@ export function renderLogout(r: { ok: boolean; remaining: number; error?: string
 
 // ---- 小工具 ----
 
-function readConfigRaw(c: MnWsController): Record<string, unknown> {
+function readConfigRaw(_c: MnWsController): Record<string, unknown> {
   // 直接读配置文件（账号簿的唯一来源），不走 loadClientConfig —— 那个会补默认值
   return readConfigFile();
 }

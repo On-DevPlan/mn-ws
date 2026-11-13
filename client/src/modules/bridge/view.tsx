@@ -6,8 +6,13 @@
 //   · 启停桥
 //   · 远端目录（server 半那边哪些能路由）
 //
-// 面板上的每个按钮都对应一条 CLI 命令（页面底部亮出来）——
-// 命令与按钮同源于一份 action 声明，不会出现「面板有、命令行没有」。
+// ── 为什么每个块都不再挂「CLI 等价」行 ──────────────────────────────────
+//
+// 改造前每个卡片右上角都挂一行「CLI 等价：mn-ws xxx」，加上页脚还有一整段
+// 命令清单 —— 同一件事说两遍，还占了整屏最显眼的��置。
+// 用户反馈：「具有开发性质的放到一个高级按钮里面即可，用户没必要认识 ws 认识 cli」。
+// 现在命令表统一收到页脚的**高级**区（见 CliHints），默认折叠；
+// 这一页只留用户真正要按的东西。
 import { useCallback, useEffect, useState } from 'react';
 import { CliHints } from '../../web/frontend/components/CliHints.js';
 import { useStore } from '../../web/frontend/store.js';
@@ -66,6 +71,7 @@ export default function BridgeView() {
 
   const configured = apps?.configured ?? [];
   const candidates = apps?.candidates ?? [];
+  const favorites = apps?.favorites ?? [];
   const selected = new Set(configured.map((c) => c.app));
 
   // ── 动态注册表单 ──────────────────────────────────────────────────
@@ -111,6 +117,27 @@ export default function BridgeView() {
     }
   }
 
+  /**
+   * 一键重新暴露一个用过的应用。
+   *
+   * 反复暴露同一个端口是最常见的动作，所以它不该要求用户重新敲
+   * 「路由标识 + 端口」两个字段 —— 名字还得是合法路由标识，
+   * 每次重敲都可能打错一个字符，然后只得到一句「名字不合法」。
+   */
+  async function reopen(app: string) {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await client['bridge.apps.reopen']({ name: app });
+      if (!r.ok) { setError(r.error || '重开失败'); return; }
+      await refresh();
+    } catch (e) {
+      setError(String((e as { message?: string })?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggle(app: string, on: boolean) {
     const next = new Set(selected);
     if (on) next.add(app); else next.delete(app);
@@ -143,10 +170,7 @@ export default function BridgeView() {
   return (
     <div className="stack" style={{ padding: 16 }}>
       <div className="card">
-        <div className="colhead">
-          连接状态
-          <span className="right muted">CLI 等价：<code>mn-ws status</code></span>
-        </div>
+        <div className="colhead">连接状态</div>
         <dl className="kv">
           <div className="kv-row">
             <dt>状态</dt>
@@ -187,16 +211,10 @@ export default function BridgeView() {
       </div>
 
       <div className="card">
-        <div className="colhead">
-          白名单
-          <span className="right muted">
-            CLI 等价：<code>mn-ws apps set --apps my-api,other=http://127.0.0.1:7800</code>
-          </span>
-        </div>
+        <div className="colhead">白名单</div>
         <div style={{ padding: 12 }} className="stack">
           <div className="muted">
-            只有勾上的应用会被桥。端口在监听 ≠ 可以桥 —— 白名单说了算，
-            否则扫到端口就自动开桥等于把整台机器暴露出去。
+            只有勾上的会被桥。没勾的一个都不桥 —— 端口在监听 ≠ 可以桥。
           </div>
 
           {configured.length > 0 && (
@@ -263,20 +281,36 @@ export default function BridgeView() {
         </div>
       </div>
 
+      {/* 常用：用过就能一键重开，不必重新敲路由标识与端口 */}
+      {favorites.length > 0 && (
+        <div className="card">
+          <div className="colhead">常用</div>
+          <div style={{ padding: 12 }} className="stack">
+            <div className="muted">点一下就能重新暴露，不用再填名字和端口。</div>
+            <div className="toolbar">
+              {favorites.map((f) => (
+                <button
+                  key={f.name}
+                  className="btn small ghost"
+                  disabled={busy}
+                  title={`${f.base}`}
+                  onClick={() => { void reopen(f.name); }}
+                >
+                  {f.title ? f.title : f.name}
+                  <span className="muted"> {f.base.replace(/^https?:\/\/[^/]+/, '')}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 动态注册：把本机任意一个 HTTP 服务开放出来 */}
       <div className="card">
-        <div className="colhead">
-          动态注册
-          <span className="right muted">
-            CLI 等价：<code>mn-ws apps add my-api --port 9999</code>
-          </span>
-        </div>
+        <div className="colhead">开放一个端口</div>
         <div style={{ padding: 12 }} className="stack">
           <div className="muted">
-            mn-ws 不认识任何具体服务 —— 要桥什么，由你在这儿登记：给它起一个**路由标识**
-            （小写字母开头，只含小写字母/数字/连字符）和端口，它就进白名单，
-            随注册帧上报给 server 半 —— 别的客户端从目录里看到之后，
-            用 <code>X-Mn-Ws-App: &lt;名字&gt;</code> 就能打过来。
+            给本机的 HTTP 服务起个名字和端口，它就进白名单，别的设备就能打过来。
           </div>
           <div className="toolbar">
             <input
@@ -312,10 +346,7 @@ export default function BridgeView() {
 
       {catalog && (
         <div className="card">
-          <div className="colhead">
-            远端目录
-            <span className="right muted">CLI 等价：<code>mn-ws catalog</code></span>
-          </div>
+          <div className="colhead">远端目录</div>
           {catalog.ok ? (
             <>
               {/* 按 PC 分组：多台机器同时接入时，先看「哪台电脑」，再看它上面的应用 */}
@@ -363,15 +394,10 @@ export default function BridgeView() {
       )}
 
       <div className="card">
-        <div className="colhead">
-          账号
-          <span className="right muted">
-            CLI 等价：<code>mn-ws auth list</code> / <code>mn-ws auth switch &lt;账号&gt;</code>
-          </span>
-        </div>
+        <div className="colhead">账号</div>
         <div style={{ padding: 12 }} className="stack">
           {accounts.length === 0 ? (
-            <div className="muted">本机还没有已存账号。登录一次：<code>mn-ws auth login</code></div>
+            <div className="muted">本机还没有已存账号。</div>
           ) : (
             <>
               {accounts.map((a) => (

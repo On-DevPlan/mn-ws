@@ -1,7 +1,11 @@
 import { scanApps } from 'mn-ws-server/apps';
 
 import type { MnWsController } from '../../core/controller.js';
-import { readConfigFile, writeConfigFile, saveCustomApps, CUSTOM_APP_NAME_RE, type CustomApp } from '../../core/config.js';
+import {
+  readConfigFile, writeConfigFile,
+} from '../../core/config.js';
+import { saveCustomApps, CUSTOM_APP_NAME_RE } from '../../core/apps-registry.js';
+import { readFavorites, rememberFavorite, type FavoriteApp } from '../../core/favorites.js';
 import { badInput } from '../../core/errors/index.js';
 
 /** 桥接状态视图。 */
@@ -29,6 +33,13 @@ export interface BridgeAppsView {
   candidates: { app: string; title: string; port: number | null; alive: boolean }[];
   /** 在白名单里、但没有登记基址的应用（被跳过了，要说清楚） */
   missing: string[];
+  /**
+   * 用过的应用（面板上的「一键重开」）。
+   *
+   * 与 configured 的差别：configured 是**现在桥着**的，favorites 是**用过**的
+   * （可能已经移除）。反复暴露同一个端口是常见动作，第二次不该重新敲一遍。
+   */
+  favorites: FavoriteApp[];
 }
 
 /** 远端目录视图。 */
@@ -119,7 +130,7 @@ export async function bridgeApps(c: MnWsController): Promise<BridgeAppsView> {
     alive: x.alive,
   }));
 
-  return { configured, candidates, missing };
+  return { configured, candidates, missing, favorites: readFavorites() };
 }
 
 /**
@@ -170,8 +181,44 @@ export function addCustomApp(
   c.cfg.customApps = list;
   if (!c.cfg.apps.includes(name)) c.cfg.apps = [...c.cfg.apps, name];
 
+  // 记一笔「用过」：下一次想再暴露同一个端口，面板上点一下就行，
+  // 不用重新敲名字（名字得是合法路由标识）与端口。
+  rememberFavorite({ name, base, title: title || undefined });
+
   const applied = restartBridge(c);
   return { ok: true, app: name, base, apps: Object.keys(c.resolveApps().apps), ...(applied ? {} : {}) };
+}
+
+/**
+ * 一键重新暴露一个用过的应用（面板上的「重开」）。
+ *
+ * 为什么值得单独一个入口：反复暴露同一个端口是**最常见**的动作
+ * （起个临时服务 → 桥出去 → 用完关掉 → 下次又要桥一次）。
+ * 走 addCustomApp 的话要重新填两个字段，而 name 必须是合法路由标识 ——
+ * 每次重敲都可能打错一个字符，然后得到一个「名字不合法」的报错。
+ *
+ * 这里直接用记忆里的 name/base，不再校验名字格式：它当初就通过了校验，
+ * 且是**从本机配置里读出来的**，不是用户这次敲的。
+ */
+export function reopenFavorite(
+  c: MnWsController,
+  name: string,
+): { ok: boolean; app?: string; base?: string; apps: string[]; error?: string } {
+  const key = String(name || '').trim();
+  const fav = readFavorites().find((f) => f.name === key);
+  if (!fav) {
+    return { ok: false, apps: Object.keys(c.resolveApps().apps), error: `没有用过这个应用：${key}` };
+  }
+  // 已经桥着就不用动：重启桥会打断正在跑的连接，而用户的意图只是「确保它在」
+  const already = (c.cfg.customApps || []).some((a) => a.name === key);
+  if (already) {
+    rememberFavorite({ name: fav.name, base: fav.base, title: fav.title });
+    return { ok: true, app: key, base: fav.base, apps: Object.keys(c.resolveApps().apps) };
+  }
+  const r = addCustomApp(c, { name: fav.name, base: fav.base, title: fav.title });
+  return r.ok
+    ? { ok: true, app: fav.name, base: fav.base, apps: r.apps }
+    : { ok: false, apps: r.apps, error: r.error };
 }
 
 /** 移除一个自定义应用（连带把它从白名单里摘掉）。 */
