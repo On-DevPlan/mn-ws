@@ -1,6 +1,6 @@
 {
   "name": "mn-ws",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "HTTP 与 WebSocket 双向桥的客户端半：把本机 nx 服务桥给远端 HTTP 客户端",
   "type": "module",
   "main": "./dist/index.js",
