@@ -107,6 +107,22 @@ export default defineModule({
       async (): Promise<CatalogView> => remoteCatalog(getController()),
       (r) => {
         if (!r.ok) return `拉目录失败：${r.error}`;
+        // 按 PC 分组：多台机器同时接入时，先看「哪台电脑」，再看它上面的应用
+        if (r.pcs && r.pcs.length) {
+          const lines = [`元信息目录（${r.pcs.length} 台 PC）`];
+          for (const pc of r.pcs) {
+            lines.push(`  ${pc.name}  (${pc.bridgeId})`);
+            if (!pc.apps.length) {
+              lines.push('    （这台电脑没有登记应用）');
+              continue;
+            }
+            for (const a of pc.apps) {
+              const mark = a.active ? '' : '   ← 路由在别的 PC 上';
+              lines.push(`    ${a.app.padEnd(12)} ${String(a.port ?? '—').padEnd(7)} ${a.title}${mark}`);
+            }
+          }
+          return lines.join('\n');
+        }
         const lines = [`元信息目录（${r.apps.length} 个可路由）`];
         for (const a of r.apps) lines.push(`  ${a.app.padEnd(10)} ${String(a.port ?? '—').padEnd(7)} ${a.title}`);
         return lines.join('\n');

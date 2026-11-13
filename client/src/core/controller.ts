@@ -98,6 +98,9 @@ export class MnWsController {
       url: this.cfg.url,
       token: this.session.credential() || this.cfg.token,
       bridgeId: this.cfg.clientId,
+      // 电脑名：多台 PC 同时接入时，远端目录按它分组。
+      // deviceName 缺省就是本机主机名（os.hostname()）。
+      pcName: this.cfg.deviceName,
       // 标题一起带上：远端目录里，标题是认出「这个端口上跑的是什么」的唯一线索，
       // 而只有 client 半知道它叫什么。
       apps: Object.fromEntries(

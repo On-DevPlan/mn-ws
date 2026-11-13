@@ -32,7 +32,15 @@ class FakeBridge {
   pending = new Map<string, (frame: Record<string, unknown>) => void>();
   registered: Promise<Record<string, unknown>>;
 
-  constructor(private url: string, private token: string, private apps: { app: string; base: string; title?: string }[]) {
+  constructor(
+    private url: string,
+    private token: string,
+    private apps: { app: string; base: string; title?: string }[],
+    /** 这台 PC 的标识（多台 PC 同时接入时各用各的） */
+    private bridgeId = 'test-bridge',
+    /** 电脑名（注册时自报，目录里按它分组） */
+    private pcName = '',
+  ) {
     this.registered = new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       this.ws = ws;
@@ -41,7 +49,8 @@ class FakeBridge {
         ws.send(encodeFrame({
           type: FRAME.REGISTER,
           role: 'bridge',
-          bridgeId: 'test-bridge',
+          bridgeId: this.bridgeId,
+          ...(this.pcName ? { name: this.pcName } : {}),
           apps: this.apps.map((a) => ({
             app: a.app,
             base: a.base,
@@ -470,6 +479,96 @@ test('心跳：正常连接扛过多轮心跳，不被误杀', async () => {
     assert.equal(res.status, 200, `过了多轮心跳后连接应该还活着：${res.body}`);
   } finally {
     bridge.close();
+    await server.close();
+    await nx.close();
+  }
+});
+
+test('多台 PC 同时接入：目录按 PC 分组，每台的应用都在自己组里', async () => {
+  const nx = await startFakeNx();
+  const server = createServer({ host: '127.0.0.1', port: 0, token: 'gate-token', dataDir: null, logLevel: 'error' });
+  const port = await server.listen();
+
+  // 两台 PC，各有各的应用；其中「nx-kv」两台都有（同名撞车）
+  const pcA = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [
+    { app: 'nx-kv', base: `http://127.0.0.1:${nx.port}` },
+  ], 'pc-a', '办公室台式机');
+  await pcA.registered;
+  const pcB = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [
+    { app: 'nx-kv', base: `http://127.0.0.1:${nx.port}` },
+    { app: 'other-api', base: `http://127.0.0.1:${nx.port}` },
+  ], 'pc-b', '家里笔记本');
+  await pcB.registered;
+
+  try {
+    const res = await httpGet(`http://127.0.0.1:${port}/api/catalog`, { 'x-mn-ws-token': 'gate-token' });
+    assert.equal(res.status, 200);
+    const j = JSON.parse(res.body);
+
+    // 两台 PC 都在目录里，各自成一组
+    assert.equal(j.pcCount, 2, `应有两台 PC：${JSON.stringify(j.pcs)}`);
+    const names = j.pcs.map((g: { name: string }) => g.name).sort();
+    assert.deepEqual(names, ['家里笔记本', '办公室台式机'].sort());
+
+    // 组里的应用各归各位：同名 app 在两台 PC 下都在
+    const byName = new Map<string, { app: string; active: boolean }[]>(
+      j.pcs.map((g: { name: string; apps: { app: string; active: boolean }[] }) => [g.name, g.apps]),
+    );
+    const a = byName.get('办公室台式机')!;
+    const b = byName.get('家里笔记本')!;
+    assert.deepEqual(a.map((x: { app: string }) => x.app), ['nx-kv']);
+    assert.deepEqual(b.map((x: { app: string }) => x.app).sort(), ['nx-kv', 'other-api']);
+
+    // 撞名的那个：路由归后来者（PC-B），但**两台都标得清楚**
+    assert.equal(a[0].active, false, '办公室台式机的 nx-kv 当前路由不到（被顶替了）');
+    assert.equal(b.find((x: { app: string }) => x.app === 'nx-kv').active, true, '后来者接管路由');
+
+    // 扁平列表仍在（老客户端靠它），且带上了电脑名
+    assert.equal(j.count, 3);
+    assert.ok(j.apps.every((a: { pcName: string }) => a.pcName));
+  } finally {
+    pcA.close();
+    pcB.close();
+    await server.close();
+    await nx.close();
+  }
+});
+
+test('X-Mn-Ws-Pc 头：指定打哪台 PC 的同名应用', async () => {
+  const nx = await startFakeNx();
+  const server = createServer({ host: '127.0.0.1', port: 0, token: 'gate-token', dataDir: null, logLevel: 'error' });
+  const port = await server.listen();
+
+  // 两台 PC 都提供 nx-kv，但基址不同 —— 打到哪台看请求头
+  const pcA = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [
+    { app: 'nx-kv', base: `http://127.0.0.1:${nx.port}` },
+  ], 'pc-a', 'A 机');
+  await pcA.registered;
+  const pcB = new FakeBridge(`ws://127.0.0.1:${port}/ws`, 'gate-token', [
+    { app: 'nx-kv', base: `http://127.0.0.1:${nx.port}` },
+  ], 'pc-b', 'B 机');
+  await pcB.registered;
+
+  try {
+    // 不带头：按路由表（后来者接管 → B 机）
+    const dflt = await httpGet(`http://127.0.0.1:${port}/nx-kv/api/ping`, { 'x-mn-ws-token': 'gate-token' });
+    assert.equal(dflt.status, 200, dflt.body);
+
+    // 指定 A 机：路由到 A 机的桥
+    const onA = await httpGet(`http://127.0.0.1:${port}/nx-kv/api/ping`, {
+      'x-mn-ws-token': 'gate-token', 'x-mn-ws-pc': 'pc-a',
+    });
+    assert.equal(onA.status, 200, onA.body);
+
+    // 指定一台没有这个应用的 PC → 明确报错，不默默打到另一台
+    const bad = await httpGet(`http://127.0.0.1:${port}/nx-kv/api/ping`, {
+      'x-mn-ws-token': 'gate-token', 'x-mn-ws-pc': 'no-such-pc',
+    });
+    assert.equal(bad.status, 404);
+    assert.equal(JSON.parse(bad.body).error, 'unknown_pc_app');
+  } finally {
+    pcA.close();
+    pcB.close();
     await server.close();
     await nx.close();
   }

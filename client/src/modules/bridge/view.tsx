@@ -317,16 +317,45 @@ export default function BridgeView() {
             <span className="right muted">CLI 等价：<code>mn-ws catalog</code></span>
           </div>
           {catalog.ok ? (
-            <dl className="kv">
-              {catalog.apps.map((a) => (
-                <div className="kv-row" key={a.app}>
-                  <dt>{a.app}</dt>
-                  <dd>
-                    {a.title} <span className="muted">{a.port ?? '—'}</span> · {a.bridgeId}
-                  </dd>
-                </div>
-              ))}
-            </dl>
+            <>
+              {/* 按 PC 分组：多台机器同时接入时，先看「哪台电脑」，再看它上面的应用 */}
+              {catalog.pcs && catalog.pcs.length > 0 ? (
+                catalog.pcs.map((pc) => (
+                  <div key={pc.bridgeId} style={{ padding: '10px 14px', borderTop: '1px solid var(--line)' }}>
+                    <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                      {pc.name} <span className="muted">{pc.bridgeId}</span>
+                    </div>
+                    {pc.apps.length === 0 ? (
+                      <div className="muted">这台电脑没有登记应用</div>
+                    ) : (
+                      <dl className="kv">
+                        {pc.apps.map((a) => (
+                          <div className="kv-row" key={a.app}>
+                            <dt>{a.app}</dt>
+                            <dd>
+                              {a.title} <span className="muted">{a.port ?? '—'}</span>
+                              {/* 撞名被顶替时要说清楚：看得见，但路由不到这一台 */}
+                              {!a.active && <span className="tag warn">路由在别的 PC 上</span>}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <dl className="kv">
+                  {catalog.apps.map((a) => (
+                    <div className="kv-row" key={`${a.bridgeId}/${a.app}`}>
+                      <dt>{a.app}</dt>
+                      <dd>
+                        {a.title} <span className="muted">{a.port ?? '—'}</span> · {a.pcName || a.bridgeId}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+            </>
           ) : (
             <div className="bad" style={{ padding: 14 }}>拉目录失败：{catalog.error}</div>
           )}

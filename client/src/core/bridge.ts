@@ -214,6 +214,8 @@ export interface WsBridgeClientOptions {
   url: string;
   token?: string;
   bridgeId?: string;
+  /** 这台 PC 的**电脑名**（注册时自报）。远端目录按它分组。 */
+  pcName?: string;
   /** app -> { base, title? } */
   apps?: Record<string, BridgeApp>;
   logger?: BridgeLogger | null;
@@ -231,6 +233,8 @@ export class WsBridgeClient {
   url: string;
   token: string;
   bridgeId: string;
+  /** 这台 PC 的电脑名（注册时自报；远端目录按它分组）。 */
+  pcName: string;
   apps: Record<string, BridgeApp>;
   logger: BridgeLogger | null;
   onStatus: (s: BridgeStatus) => void;
@@ -250,6 +254,7 @@ export class WsBridgeClient {
     url,
     token = '',
     bridgeId = '',
+    pcName = '',
     apps = {},
     logger = null,
     onStatus,
@@ -257,6 +262,7 @@ export class WsBridgeClient {
     this.url = url;
     this.token = token;
     this.bridgeId = bridgeId;
+    this.pcName = pcName;
     this.apps = apps;
     this.logger = logger;
     this.onStatus = onStatus || (() => {});
@@ -330,6 +336,9 @@ export class WsBridgeClient {
         type: FRAME.REGISTER,
         role: 'bridge',
         bridgeId: this.bridgeId,
+        // 电脑名：多台 PC 同时接入时，远端目录靠它分组。
+        // 光有 bridgeId（机器名 + 随机 6 位）看不出「这是哪台电脑」。
+        ...(this.pcName ? { name: this.pcName } : {}),
         apps,
         token: this.token,
       });

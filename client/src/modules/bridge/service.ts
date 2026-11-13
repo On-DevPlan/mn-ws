@@ -36,7 +36,32 @@ export interface CatalogView {
   ok: boolean;
   error?: string;
   count?: number;
-  apps: { app: string; title: string; port: number | null; base: string | null; bridgeId: string; connectedAt: string }[];
+  apps: CatalogApp[];
+  /** 按 PC 分组的目录（多台 PC 同时接入时的主要视图）。 */
+  pcs?: CatalogPc[];
+}
+
+/** 目录里的一个应用。 */
+export interface CatalogApp {
+  app: string;
+  title: string;
+  port: number | null;
+  base: string | null;
+  bridgeId: string;
+  /** 这台 PC 的电脑名。 */
+  pcName?: string;
+  /** 这个 app 名当前**路由不到**这台 PC（被别的 PC 顶替了）。 */
+  pcNameMissing?: boolean;
+}
+
+/** 目录里的一个 PC 分组。 */
+export interface CatalogPc {
+  bridgeId: string;
+  /** 电脑名（client 自报）。 */
+  name: string;
+  userId: string;
+  connectedAt: string;
+  apps: (CatalogApp & { active: boolean })[];
 }
 
 /** 桥接状态。 */
@@ -235,14 +260,25 @@ export async function remoteCatalog(c: MnWsController): Promise<CatalogView> {
   const raw = await res.text();
   // 用 IIFE 解析：let + try/catch 的写法会被 TS 的控制流分析
   // 误判成「json 仍是初始的 null」，后面 json.ok 就成了 never。
-  const json = ((): { ok?: boolean; error?: string; apps?: CatalogView['apps'] } | null => {
-    try { return JSON.parse(raw) as { ok?: boolean; error?: string; apps?: CatalogView['apps'] }; }
+  const json = ((): {
+    ok?: boolean; error?: string; apps?: CatalogView['apps']; pcs?: CatalogView['pcs'];
+  } | null => {
+    try {
+      return JSON.parse(raw) as {
+        ok?: boolean; error?: string; apps?: CatalogView['apps']; pcs?: CatalogView['pcs'];
+      };
+    }
     catch { return null; }
   })();
   if (!res.ok || !json || json.ok !== true) {
     return { ok: false, error: (json && json.error) || `HTTP ${res.status}`, apps: [] };
   }
-  return { ok: true, count: (json.apps || []).length, apps: json.apps || [] };
+  return {
+    ok: true,
+    count: (json.apps || []).length,
+    apps: json.apps || [],
+    pcs: json.pcs || [],
+  };
 }
 
 // ---- 渲染 ----

@@ -22,6 +22,29 @@ import { AuthHub } from './auth.js';
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
 /**
+ * 请求头：指定这次请求打**哪台 PC**。
+ *
+ * 为什么需要它：「一个 app 名对应一个桥」是**路由**的规矩。多台 PC 同时接入
+ * 时，两台机器都跑 nx-kv 就会出现同名 app —— 目录里两台都在（分组展示），
+ * 但路由表只能指向一个。不给这个头，就只能打到路由表指向的那台，
+ * 另一台看得见却打不到；给了这个头，就能精确指定。
+ *
+ * 值是 bridgeId（client 半的稳定标识）。
+ */
+const PC_HEADER = 'x-mn-ws-pc';
+
+/** 从规范化后的头对象里取一个头的值（第一个）。 */
+function headerValue(
+  headers: Record<string, string[] | string> | null | undefined,
+  name: string,
+): string {
+  if (!headers) return '';
+  const v = headers[name];
+  if (Array.isArray(v)) return v.length ? String(v[0] || '').trim() : '';
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+/**
  * mn-ws server —— 公网侧的 HTTP ⇄ WebSocket 桥。
  *
  * 一个端口同时提供：
@@ -80,6 +103,37 @@ interface Bridge {
   ip: string | undefined;
 }
 
+/**
+ * 一台已注册的 **PC**（client half 所在的机器）。
+ *
+ * ## 为什么 PC 与「app → 桥」的路由表要分开
+ *
+ * `bridges: Map<app, Bridge>` 是**路由表**：一个 app 名对应一条连接，
+ * 撞名时后来者接管（见下文「顶替」）。但**多台 PC 同时接入**时，
+ * 只靠这张表会丢东西 —— PC-B 注册了 PC-A 也有的 app，路由归了 PC-B，
+ * PC-A 在目录里就整个消失了。
+ *
+ * 而用户真正想看的是「**我有哪几台电脑，每台上跑着什么**」。
+ * 所以另有一张 `pcs: Map<bridgeId, PcEntry>`：**每台 PC 一条，永不互相顶替**
+ * （只有同一台 PC 自己重连时才覆盖自己的旧条目）。
+ *
+ * 两张表的分工：
+ *   · `pcs` —— 展示：目录按 PC 分组，组里列这台 PC 的应用
+ *   · `bridges` —— 路由：app 名该打到哪条连接上
+ */
+interface PcEntry {
+  bridgeId: string;
+  /** 电脑名（client 自报）；client 没报就用 bridgeId 兜底 */
+  name: string;
+  ws: WebSocket;
+  userId: string;
+  isGate: boolean;
+  /** 这台 PC 注册的 app 表 */
+  apps: AppDescriptor[];
+  connectedAt: string;
+  ip: string | undefined;
+}
+
 /** 一条等待中的请求。 */
 interface Pending {
   res: ServerResponse;
@@ -113,6 +167,13 @@ interface PeerMeta {
    * 有这份记录，才能在顶替者断开时把 app 还给还活着的旧桥。
    */
   appList: AppDescriptor[];
+  /**
+   * 电脑名（client 自报）。没报就是空串 —— 目录里用 bridgeId 兜底。
+   *
+   * 它存在的意义：多台 PC 同时接入时，光有 bridgeId（机器名 + 随机 6 位）
+   * 看不出「这是哪台电脑」。电脑名是 client 自己认得的说法。
+   */
+  pcName: string;
 }
 
 /** 调用方身份。 */
@@ -155,8 +216,15 @@ export function createServer(userConfig: ServerOptions = {}) {
 
   // ────────────────── 状态 ──────────────────
 
-  /** app -> 桥 */
+  /** app -> 桥（**路由表**：app 名该打到哪条连接上） */
   const bridges = new Map<string, Bridge>();
+  /**
+   * bridgeId -> PC（**展示表**：每台 PC 一条，互不顶替）。
+   *
+   * 目录按 PC 分组就是从这张表出的。多台 PC 同时接入时，各自的应用都在，
+   * 不会因为「撞名后来者接管」而把别人的整台机器从目录里抹掉。
+   */
+  const pcs = new Map<string, PcEntry>();
   /** 曾经注册过的 app 名 —— 用来区分「从没这个应用」与「这个应用的桥掉线了」 */
   const knownApps = new Set<string>();
   /** requestId -> 等待中的请求 */
@@ -335,25 +403,72 @@ export function createServer(userConfig: ServerOptions = {}) {
 
       // ── 元信息目录：登录后拉「哪些可以路由」 ──
       // 远端客户端拿到凭据后的第一步就是拉这份目录 —— 看清有哪些应用、
-      // 各自在哪个端口、由哪台桥承载，再决定调哪个、怎么调（路径前缀或
+      // 各自在哪个端口、由哪台 PC 承载，再决定调哪个、怎么调（路径前缀或
       // X-Mn-Ws-App 头）。
+      //
+      // **两份视图**：
+      //   · `pcs` —— 按 PC 分组（多台 PC 同时接入时的主要视图）
+      //   · `apps` —— 扁平列表（老客户端只认这个；保留是为了不把已有客户端打碎）
+      // 扁平列表里的每个 app 额外带 `pcName` 与 `pcNameMissing`：
+      //   · pcName —— 这台 PC 的电脑名
+      //   · pcNameMissing —— **这个 app 名当前路由不到这台 PC**（被别的 PC 顶替了）。
+      //     说清楚比不说好：否则用户会以为「目录里有就能打」。
       if (url.pathname === '/api/catalog') {
         const caller = identifyCaller(req);
         if (!caller.ok) { sendRes(res, caller.status, { ok: false, error: caller.error }); return; }
-        const list = [];
-        for (const [app, b] of bridges) {
-          // 具名用户只看得到自己名下的桥
-          if (!caller.isGate && b.userId !== caller.userId) continue;
-          list.push({
-            app,
-            title: b.meta && b.meta.title ? b.meta.title : app,
-            port: b.meta ? b.meta.port : null,
-            base: b.meta ? b.meta.base : null,
-            bridgeId: b.bridgeId,
-            connectedAt: b.connectedAt,
+
+        // 具名用户只看得到自己名下的 PC
+        const visible = (u: string) => caller.isGate || u === caller.userId;
+
+        // 按 PC 分组
+        const groups = [];
+        for (const pc of pcs.values()) {
+          if (!visible(pc.userId)) continue;
+          groups.push({
+            bridgeId: pc.bridgeId,
+            name: pc.name,
+            userId: pc.userId,
+            connectedAt: pc.connectedAt,
+            apps: pc.apps.map((m) => ({
+              app: m.app,
+              title: m.title,
+              port: m.port,
+              base: m.base,
+              bridgeId: pc.bridgeId,
+              // 这个 app 名现在路由到谁那儿 —— 路由表里的主人
+              active: bridges.get(m.app)?.bridgeId === pc.bridgeId,
+            })),
           });
         }
-        sendRes(res, 200, { ok: true, count: list.length, apps: list });
+        // 组内按名字排，组之间按电脑名排 —— 目录每次读出来顺序都一样，
+        // 免得刷新一下顺序就变了、用户以为谁动了谁的。
+        groups.sort((a, b) => a.name.localeCompare(b.name));
+
+        // 扁平列表（兼容老客户端）：按 PC 分组展开
+        const list = [];
+        for (const g of groups) {
+          for (const a of g.apps) {
+            list.push({
+              app: a.app,
+              title: a.title,
+              port: a.port,
+              base: a.base,
+              bridgeId: a.bridgeId,
+              pcName: g.name,
+              connectedAt: g.connectedAt,
+              // 路由不到这台 PC 时明确标出来
+              pcNameMissing: !a.active,
+            });
+          }
+        }
+
+        sendRes(res, 200, {
+          ok: true,
+          count: list.length,
+          apps: list,
+          pcs: groups,
+          pcCount: groups.length,
+        });
         return;
       }
 
@@ -373,7 +488,8 @@ export function createServer(userConfig: ServerOptions = {}) {
       }
 
       // ── 桥接入口：/<app>/* ──
-      const resolved = resolveApp(url.pathname, normalizeHeaders(req.headers));
+      const reqHeaders = normalizeHeaders(req.headers);
+      const resolved = resolveApp(url.pathname, reqHeaders);
       if ('error' in resolved) {
         stats.rejected += 1;
         send(400, { ok: false, error: resolved.error });
@@ -384,7 +500,34 @@ export function createServer(userConfig: ServerOptions = {}) {
       const caller = identifyCaller(req);
       if (!caller.ok) { send(caller.status, { ok: false, error: caller.error }); return; }
 
-      const bridge = bridges.get(app);
+      // ── 选哪台 PC 来服务这个请求 ─────────────────────────────────
+      // 默认按路由表（app 名 → 桥，撞名时后来者接管）。
+      // 但**多台 PC 可能有同名 app**（两台机器都跑 nx-kv），这时调用方可以
+      // 用 `X-Mn-Ws-Pc: <bridgeId>` 指定打哪一台 —— 否则目录里看得见、
+      // 却打不到的那台就成了摆设。
+      let bridge = bridges.get(app);
+      const pcHint = headerValue(reqHeaders, PC_HEADER);
+      if (pcHint) {
+        const pc = pcs.get(pcHint);
+        if (pc && pc.apps.some((a) => a.app === app)) {
+          const own = pc.apps.find((a) => a.app === app);
+          bridge = {
+            ws: pc.ws,
+            bridgeId: pc.bridgeId,
+            userId: pc.userId,
+            isGate: pc.isGate,
+            apps: pc.apps,
+            meta: own,
+            connectedAt: pc.connectedAt,
+            ip: pc.ip,
+          };
+        } else {
+          // 指定了但不在这台 PC 上 → 明确说，别默默打到另一台去
+          stats.rejected += 1;
+          sendRes(res, 404, { ok: false, error: 'unknown_pc_app', app, pc: pcHint });
+          return;
+        }
+      }
       if (!bridge) {
         stats.offline += 1;
         // 区分两种「没有」：这个应用从来没注册过（404），
@@ -532,6 +675,7 @@ export function createServer(userConfig: ServerOptions = {}) {
       ip: req.socket.remoteAddress,
       isGate: false,
       appList: [],
+      pcName: '',
     });
     stats.connections += 1;
     logger.info('peer connected', { peerId, ip: req.socket.remoteAddress });
@@ -638,6 +782,30 @@ export function createServer(userConfig: ServerOptions = {}) {
       for (const [app, b] of [...bridges.entries()]) {
         if (b.ws === ws) bridges.delete(app);
       }
+      // 展示表里也摘掉这台 PC（目录不该留着已经断开的机器）
+      for (const [id, pc] of [...pcs.entries()]) {
+        if (pc.ws === ws) pcs.delete(id);
+      }
+      // 同一台 PC 的**另一个连接**还在（比如同机跑了两份、或重启时新旧连接
+      // 交叠）：它该接着当这台 PC 的代表，否则目录里这台机器会整个消失。
+      if (meta.bridgeId) {
+        for (const [otherWs, other] of peers) {
+          if (otherWs === ws || other.bridgeId !== meta.bridgeId) continue;
+          if (pcs.has(meta.bridgeId)) break;
+          pcs.set(meta.bridgeId, {
+            bridgeId: meta.bridgeId,
+            name: other.pcName || meta.bridgeId,
+            ws: otherWs,
+            userId: other.userId ?? '',
+            isGate: other.isGate,
+            apps: other.appList,
+            connectedAt: other.connectedAt,
+            ip: other.ip,
+          });
+          logger.info('同一台 PC 的存活连接接管了展示条目', { bridgeId: meta.bridgeId, peerId: other.peerId });
+          break;
+        }
+      }
       // 顶替者断开后把它顶走的 app 还给仍连着的旧桥（否则 app 会永久空档）
       restoreReplacedApps(ws, meta);
       // 该桥上还没回的请求全部失败
@@ -671,8 +839,17 @@ export function createServer(userConfig: ServerOptions = {}) {
     for (const appMeta of deadMeta.appList) {
       const app = appMeta.app;
       if (bridges.has(app)) continue; // 现在有主了 —— 后来者仍然优先
-      for (const [ws, p] of peers) {
-        if (ws === deadWs) continue;
+      // 候选：仍连着、且注册过这个 app 的桥。
+      // 优先挑**当前还在展示表里**的那台 PC —— 同一台 PC 重连过的话，
+      // 它的旧连接虽然还开着，但已经不是「这台 PC」了，路由还给它是错的。
+      const candidates = [...peers.entries()]
+        .filter(([ws, p]) => ws !== deadWs && p.appList.some((a) => a.app === app))
+        .sort((a, b) => {
+          const aLive = [...pcs.values()].some((pc) => pc.ws === a[0]) ? 0 : 1;
+          const bLive = [...pcs.values()].some((pc) => pc.ws === b[0]) ? 0 : 1;
+          return aLive - bLive;
+        });
+      for (const [ws, p] of candidates) {
         const own = p.appList.find((a) => a.app === app);
         if (!own) continue;
         bridges.set(app, {
@@ -696,6 +873,7 @@ export function createServer(userConfig: ServerOptions = {}) {
    *
    * 鉴权与「HTTP 调用方」同一套：设备令牌 → 具名用户；静态门禁 → 全量。
    * 注册时带上 app 表（app → base），服务端据此知道这台桥能桥什么。
+   * 另带**电脑名**（name）——多台 PC 同时接入时，光有 bridgeId 看不出是哪台电脑。
    */
   function handleRegister(ws: WebSocket, meta: PeerMeta, msg: Frame): void {
     const bearer = String(msg.token || '');
@@ -730,7 +908,38 @@ export function createServer(userConfig: ServerOptions = {}) {
       ));
     }
 
-    // 同 app 被别的桥占用 → 顶替（旧桥的该 app 摘掉）
+    const bridgeId = String(msg.bridgeId || meta.peerId);
+    // 电脑名：client 自报；没报就用 bridgeId 兜底（目录里至少有个能认出来的名字）
+    const pcName = String(msg.name || msg.pcName || '').trim() || bridgeId;
+
+    // ── 同一台 PC 的旧登记（重连）先摘掉 ──────────────────────────
+    // 同一 bridgeId 再连上来 = 这台 PC 重启了。它的旧条目要覆盖，
+    // 否则目录里会出现「两台同名 PC」。
+    const prevPc = pcs.get(bridgeId);
+    if (prevPc && prevPc.ws !== ws) {
+      for (const [app, b] of [...bridges.entries()]) {
+        if (b.ws === prevPc.ws) bridges.delete(app);
+      }
+    }
+
+    // ── 展示表：每台 PC 一条，互不顶替 ────────────────────────────
+    // 「一个 app 名只有一个桥」是**路由**的规矩，不是**展示**的规矩。
+    // 多台 PC 同时接入时，各自在目录里都在 —— 用户要看到的是
+    // 「我有哪几台电脑，每台上跑着什么」。
+    pcs.set(bridgeId, {
+      bridgeId,
+      name: pcName,
+      ws,
+      userId,
+      isGate,
+      apps: clean,
+      connectedAt: new Date().toISOString(),
+      ip: meta.ip,
+    });
+
+    // ── 路由表：app 名该打到哪条连接 ───────────────────────────────
+    // 同 app 被别的 PC 占用 → 路由交给后来者（这是**路由**的选择，
+    // 不影响展示：两台 PC 在目录里都还在，请求可用 X-Mn-Ws-Pc 指定目标）。
     const replaced: string[] = [];
     for (const { app } of clean) {
       const prev = bridges.get(app);
@@ -745,7 +954,7 @@ export function createServer(userConfig: ServerOptions = {}) {
       const appMeta = clean.find((m) => m.app === app);
       bridges.set(app, {
         ws,
-        bridgeId: String(msg.bridgeId || meta.peerId),
+        bridgeId,
         userId,
         isGate,
         apps: clean,
@@ -756,17 +965,19 @@ export function createServer(userConfig: ServerOptions = {}) {
     }
 
     meta.registered = true;
-    meta.bridgeId = String(msg.bridgeId || meta.peerId);
+    meta.bridgeId = bridgeId;
     meta.userId = userId;
     meta.isGate = isGate;
     meta.appList = clean;
+    meta.pcName = pcName;
 
     logger.info('bridge registered', {
-      peerId: meta.peerId, bridgeId: meta.bridgeId, userId, apps: clean.map((a) => a.app),
+      peerId: meta.peerId, bridgeId, pcName, userId, apps: clean.map((a) => a.app),
     });
     sendWs(ws, {
       type: FRAME.REGISTERED,
-      bridgeId: meta.bridgeId,
+      bridgeId,
+      name: pcName,
       apps: clean.map((a) => a.app),
       replaced,
     });
