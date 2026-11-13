@@ -124,23 +124,38 @@ client 半的面板跑在**本机回环**（默认 `:7777`，`--port` 运行时�
 
 ## 远端怎么用：先看目录，再选，再路由
 
-远端客户端拿到凭据后的标准动作是**先拉目录**（知道能路由到什么），再按应用标识发起请求：
+远端客户端拿到凭据后的标准动作是**先拉目录**（知道能路由到什么），再按应用标识发起请求。
+
+目录**按 PC 分组** —— 多台电脑同时开着桥时，你要看的是「我有哪几台电脑，
+每台上跑着什么」：
 
 ```bash
-# ① 拉元信息目录（哪些能路由、分别在哪个端口、由哪台桥承载）
+# ① 拉元信息目录（按 PC 分组）
 curl -H 'X-Mn-Ws-Token: <门禁TOKEN>' http://<服务器>:7777/api/catalog
 ```
 
 ```json
 {
   "ok": true,
-  "count": 2,
-  "apps": [
-    {"app":"my-api","title":"我的服务","port":9999,"base":"http://127.0.0.1:9999",
-     "bridgeId":"host-a","connectedAt":"2026-11-12T11:00:00.000Z"},
-    {"app":"other-api","title":"另一个服务","port":7800,"base":"http://127.0.0.1:7800",
-     "bridgeId":"host-b","connectedAt":"2026-11-12T11:00:01.000Z"}
-  ]
+  "pcCount": 2,
+  "count": 3,
+  "pcs": [
+    {
+      "bridgeId": "pc-a", "name": "办公室台式机", "userId": "5",
+      "apps": [
+        {"app":"my-api","title":"我的服务","port":9999,"base":"http://127.0.0.1:9999",
+         "bridgeId":"pc-a","active":true}
+      ]
+    },
+    {
+      "bridgeId": "pc-b", "name": "家里笔记本", "userId": "5",
+      "apps": [
+        {"app":"my-api","title":"我的服务","port":9999,"base":"http://127.0.0.1:9999",
+         "bridgeId":"pc-b","active":false}
+      ]
+    }
+  ],
+  "apps": [ /* 同一份内容的扁平形态，老客户端靠它 */ ]
 }
 ```
 
@@ -156,6 +171,22 @@ curl -H 'X-Mn-Ws-Token: $TOKEN' -H 'X-Mn-Ws-App: my-api' \
 ```
 
 两者冲突 → `400 app_conflict`（**不猜**：猜错等于把请求打到别的服务上）。
+
+### 两台机器都有同一个应用时
+
+「一个 app 名对应一个桥」是**路由**的规矩。两台 PC 都跑 `my-api` 时，
+路由归**后来注册**的那台（`active: true` 标出来），另一台也在目录里，
+但它那份 `active: false` —— 看得见、路由不到。
+
+要精确指定打哪台，加一个头：
+
+```bash
+curl -H 'X-Mn-Ws-Token: $TOKEN' \
+     -H 'X-Mn-Ws-App: my-api' -H 'X-Mn-Ws-Pc: pc-a' \
+     'http://<服务器>:7777/api/ping'
+```
+
+指定了但那台没有这个应用 → `404 unknown_pc_app`（**不默默打到另一台**）。
 
 ### 多路复用
 
