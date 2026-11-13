@@ -165,12 +165,25 @@ git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
   相比 GHCR pull 的好处是时间可控（不会卡在 registry 同步怪象上）；
   代价是没有镜像缓存层，服务器每次都要重新 load。
   包在服务器上 `docker load` 完立刻 `rm`，不留垃圾。
-- **公网裸奔**：7777 对公网开放，WS 无 TLS。**这是目前最该修的一条** ——
-  client 半拿 access_token 去 server 半换设备令牌的那一跳是明文，
-  截获就等于账号接管。正式使用建议前置 nginx + TLS。
+- **公网裸奔（已接受的风险）**：7777 对公网开放，WS 无 TLS。
+  - **2026-11-13 决定：维持现状，不前置 nginx + TLS。** 这是**明确接受**的
+    风险，不是待办 —— 记在这里是为了以后回看时知道它是拍过的板。
+  - **现在的暴露面**：明文那一跳带的是 **mn-ws 的业务令牌**（L1 凭据，
+    `X-Mn-Ws-Token`）。截获它 = 账号接管（它就是访问桥的钥匙）。
+    ⚠️ 早期版本里这一跳带的是**认证中心的 access_token**，那个更致命 ——
+    它指向整个平台身份。0.4.0 起换码搬到了服务端
+    （`POST /auth/oidc/callback`），认证中心的凭据不再出服务端，
+    暴露面从「平台级令牌」降到了「桥自身的令牌」。
+  - 真要收口时，最省事的两步：① 前置 nginx + TLS；② 把业务令牌 TTL
+    从 90 天压到小时级（`DEVICE_TOKEN_TTL_SEC`），让截获的窗口变小。
 - **认证中心侧的 client**：统一登录需要在认证中心登记
   `client_id=mn-ws-client` 与 `client_id=mn-ws-server`，
   没登记时 `auth login` 会在 authorize 端点被拒（`invalid client_id`）。
-  ⚠️ **这两个只登记在 DB 里，不是 go-ah 的种子** —— 重建库时不会自动带上，
-  要重新登记（或把它们加进 `auth-hub/internal/db/db.go` 的种子）。
+  - ⚠️ **这两个只登记在 DB 里，不是 go-ah 的种子** —— 重建库时不会自动带上。
+  - **2026-11-13 决定：不改 go-ah 源码**（不往 `auth-hub/internal/db/db.go`
+    的种子里加）。代价就是**重建库后必须重新登记**。
+  - 重建后的补登记：走 go-ah 的管理 API `POST /api/admin/clients`，
+    两条都是**公共客户端 + PKCE + 回环通配**：
+    - `mn-ws-client` —— 回调白名单 `http://127.0.0.1:*/callback`
+    - `mn-ws-server` —— 回调白名单 `http://127.0.0.1:7777/auth/callback`
 

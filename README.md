@@ -332,7 +332,10 @@ POST /auth/oidc/callback
 - **心跳**：两端都定期 ping 对方。TCP 是半开的 —— 对端被 `docker rm` 掉时
   RST 可能丢掉，没有心跳就会出现「客户端以为还连着、其实已经哑了」，
   而且**永远不会自己恢复**
-- ⚠️ **公网那台 server 的 7777 是裸奔的**（无 TLS）—— 见 [docs/DEPLOY.md](docs/DEPLOY.md) 的「已知风险」
+- ⚠️ **公网那台 server 的 7777 是裸奔的**（无 TLS）—— **已明确接受的风险**
+  （2026-11-13 决定：不前置 nginx + TLS）。明文那一跳带的是 mn-ws 自己的
+  业务令牌，截获即等于账号接管。细节与「真要收口时怎么收」见
+  [docs/DEPLOY.md](docs/DEPLOY.md) 的「已知风险」
 
 ---
 
