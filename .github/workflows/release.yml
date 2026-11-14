@@ -67,8 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           CLIENT_VER=$(node -p "require('./client/package.json').version")
-          SERVER_VER=$(node -p "require('./server/package.json').version")
-          echo "mn-ws $CLIENT_VER · mn-ws-server（不发 npm）$SERVER_VER"
+          echo "mn-ws $CLIENT_VER"
           if [ "${{ github.ref_type }}" = "tag" ]; then
             TAG="${GITHUB_REF_NAME}"
             if [ "$TAG" != "v$CLIENT_VER" ]; then
@@ -100,13 +99,10 @@ jobs:
 
       - name: Test
         run: |
-          pnpm --filter mn-ws-server test
-          pnpm --filter mn-ws test:unit
-          # Rust 侧的测试（协议层 + server 半 + e2e）
+          # Rust 侧的测试（协议层 + client 半 + server 半 + e2e）
           cd rust && cargo test --release && cd ..
-          # 交叉兼容：TS ↔ Rust 两个方向都要通
-          pnpm --filter mn-ws test:cross
-          # Rust 面板实测：伺服 React 产物 + 全部 API 端点
+          # Rust 二进制冒烟 + 面板实测（伺服 React 产物 + 全部 API 端点）
+          pnpm --filter mn-ws test:smoke
           pnpm --filter mn-ws test:panel
 
   # ── 平台矩阵：每平台各自编译二进制、生成并发布子包 ─────────────────
@@ -196,11 +192,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # 主包要带面板产物（React 构建）。
-      # ⚠️ 必须 -r 全量构建：client 的 TS 代码 import `mn-ws-server/protocol`
-      #    （workspace 链接指向 server/dist），server 半不先构建就找不到模块。
+      # 主包要带面板产物（React 构建，平台无关，只此一份）。
+      # Rust 化后 client 的构建只有 vite —— 无 TS 运行时可依赖。
       - name: Build client（React 产物）
-        run: pnpm -r --workspace-concurrency=1 build
+        run: pnpm --filter mn-ws build
 
       - name: 装 web 产物进主包
         run: node scripts/install-rust-bin.mjs web

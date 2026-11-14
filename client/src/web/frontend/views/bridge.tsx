@@ -1,4 +1,4 @@
-// 桥接视图：**client 半的管理面**。
+﻿// 桥接视图：**client 半的管理面**。
 //
 // 这一页回答的是「这台桥现在什么状态、能桥什么」：
 //   · 连接状态（连没连、注册了哪些 app、当前凭据是谁）
@@ -14,10 +14,9 @@
 // 现在命令表统一收到页脚的**高级**区（见 CliHints），默认折叠；
 // 这一页只留用户真正要按的东西。
 import { useCallback, useEffect, useState } from 'react';
-import { CliHints } from '../../web/frontend/components/CliHints.js';
-import { useStore } from '../../web/frontend/store.js';
-import type { BridgeStatusView, BridgeAppsView, CatalogView } from './service.js';
-import type { AccountsView } from '../auth/service.js';
+import { CliHints } from '../components/CliHints.js';
+import { useStore } from '../store.js';
+import type { BridgeStatusView, BridgeAppsView, CatalogView, AccountsView } from '../api/view-types.js';
 
 export default function BridgeView() {
   const { client } = useStore();

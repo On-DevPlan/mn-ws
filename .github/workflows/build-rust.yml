@@ -175,10 +175,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # client 包要带 React 构建产物（面板的静态资源）。
-      # ⚠️ server 半也要构建：client 的 TS 代码（core/bridge.ts 等，交叉兼容测试
-      #    的对照物）import `mn-ws-server/protocol` —— 那是 workspace 链接，
-      #    指向 server/dist/*.js，不构建就找不到模块。
-      - name: 构建 TS 产物
+      # Rust 化后 TS 只剩 vite 前端 —— 无 server 半可构建。
+      - name: 构建前端产物
         run: pnpm -r --workspace-concurrency=1 build
 
       # 校验发布链路在当前平台真能走通：把 target-specific 产物放到

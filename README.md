@@ -69,11 +69,10 @@ curl -H 'X-Mn-Ws-Token: <门禁TOKEN>' \
 
 ```bash
 pnpm install
-pnpm -r build                            # 两个包的 TS 产物（前端 + 类型）
+pnpm -r build                            # React 面板产物（TS 只剩前端）
 cd rust && cargo build --release         # 两个原生二进制
-pnpm --filter mn-ws-server test
-pnpm --filter mn-ws test:unit
-pnpm --filter mn-ws dev                  # vite + 后端 tsx 直跑源码
+cd rust && cargo test --release          # Rust 全量测试
+pnpm --filter mn-ws dev                  # Rust 面板 + vite HMR
 ```
 
 **Rust 侧**（协议层 / 两半的实现）：
@@ -366,14 +365,13 @@ POST /auth/oidc/callback
 
 ```bash
 pnpm install
-pnpm -r build                            # 两个包的 TS 产物（前端 + 类型）
-pnpm --filter mn-ws-server test          # 37 例（协议 / 端到端 / 鉴权 / 多路复用 / 业务令牌 / 心跳）
-pnpm --filter mn-ws test:unit            # 79 例（配置 / 账号簿 / PKCE / 白名单 / 面板）
-pnpm --filter mn-ws test:cross           # 交叉兼容：TS ↔ Rust 两个方向
+pnpm -r build                            # React 面板产物
+pnpm --filter mn-ws test:smoke           # Rust 二进制冒烟（进程内跑关键路径）
 pnpm --filter mn-ws test:panel           # Rust 面板实测：伺服 React 产物 + 全部 API 端点
 pnpm --filter mn-ws test:e2e             # 打已部署的公网 server 半做远端验收
+node scripts/verify-dist.mjs             # 分发实测：装 npm 包 → 启动器 → 二进制
 
-cd rust && cargo test --release          # 75 例（协议层 / 两半 / 端到端）
+cd rust && cargo test --release          # 89 例（协议层 / 两半 / 端到端）
 ```
 
 **分发实测**（打包 → 装到隔离目录 → **移除 PATH 里的 node** → 跑）：

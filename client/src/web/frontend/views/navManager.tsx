@@ -1,4 +1,4 @@
-// 栏目管理：**容器 + 拖拽**。整页只有一个心智模型——
+﻿// 栏目管理：**容器 + 拖拽**。整页只有一个心智模型——
 //   一个页面要么在「平铺」里、要么在某个分组里、要么在「隐藏」里；
 //   拖，就是把它从一个容器挪到另一个。
 //
@@ -12,8 +12,8 @@
 // **受控组件**：数据（cfg）与保存都在本页（首页）；这里只管画与调 onChange。
 // 所有数据操作走 navModel 的纯函数（可单测），组件里不做状态体操。
 import { Fragment, useState } from 'react';
-import * as nav from '../../web/frontend/components/navModel.js';
-import type { NavConfig, Target } from '../../web/frontend/components/navModel.js';
+import * as nav from '../components/navModel.js';
+import type { NavConfig, Target } from '../components/navModel.js';
 
 interface Section {
   id: string;

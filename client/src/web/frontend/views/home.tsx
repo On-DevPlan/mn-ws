@@ -1,4 +1,4 @@
-// 首页视图：面板落地页，把「演示动作 + 运行信息 + 本机设置」放在同一页。
+﻿// 首页视图：面板落地页，把「演示动作 + 运行信息 + 本机设置」放在同一页。
 //
 // 所有请求走类型安全 client：action id、参数名、flag 值类型、返回数据
 // 全部由注册表类型推出，写错在编译期就红。
@@ -6,15 +6,15 @@
 // 页面分两部分：上半是演示动作（问候）与运行信息，
 // 下半是本机设置（外观主题、栏目管理）。主题点击即保存；栏目管理一页一保存。
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '../../web/frontend/api/client.js';
-import { CliHints } from '../../web/frontend/components/CliHints.js';
-import { Copyable, useGuard, useToast } from '../../web/frontend/components/ui.jsx';
-import { ThemePicker } from '../../web/frontend/components/theme.jsx';
-import { useStore } from '../../web/frontend/store.js';
-import * as nav from '../../web/frontend/components/navModel.js';
-import type { NavConfig } from '../../web/frontend/components/navModel.js';
+import { api } from '../api/client.js';
+import { CliHints } from '../components/CliHints.js';
+import { Copyable, useGuard, useToast } from '../components/ui.jsx';
+import { ThemePicker } from '../components/theme.jsx';
+import { useStore } from '../store.js';
+import * as nav from '../components/navModel.js';
+import type { NavConfig } from '../components/navModel.js';
 import NavManager from './navManager.js';
-import type { GreetingResult } from './service.js';
+import type { GreetingResult } from '../api/view-types.js';
 
 // 面板里也把 CLI 等价写法亮出来（agent 与人都能照着敲）
 const NAV_CLI_HINT = `mn-ws setting set --set 'navGroups=[{"title":"求职","views":["home"]}]'`

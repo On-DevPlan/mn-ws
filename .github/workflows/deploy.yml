@@ -21,7 +21,6 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'server/**'
       - 'client/**'
       - 'rust/**'
       - 'scripts/**'
@@ -63,17 +62,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # ⚠️ 构建必须先过：**dist/ 是宿主机构建好的产物**，镜像里直接 COPY 它。
-      #    server 半的构建顺序在 workspace 依赖图里是对的（client 依赖 server，
-      #    pnpm -r 会先构建 server）。
-      #
+      # 前端产物（React 构建）必须先过：镜像构建链路里会用到的部分在这里验证可构建。
       #    Rust 二进制**不在这步构建** —— Dockerfile 里是多阶段构建，
       #    编译发生在镜像构建阶段（rust:1.92-slim 基础镜像里）。
       - name: Build packages
         run: pnpm -r --workspace-concurrency=1 build
-
-      - name: Test server package
-        run: pnpm --filter mn-ws-server test
 
       # Rust 侧的测试也要过 —— 镜像里跑的就是这个二进制。
       - name: Test Rust crates

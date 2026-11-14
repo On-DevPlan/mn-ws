@@ -7,13 +7,11 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { ReactNode } from 'react';
 import { api } from './api/client.js';
 import { makeTypedClient } from './api/typed-client.js';
-import type { TypedClient } from '../../runtime/types/client.js';
-import type { MODULES } from '../../runtime/registry.js';
-import type { CommandEntry } from '../../runtime/help.js';
+import type { TypedClient, CommandEntry } from './api/contracts.js';
 
 const LS_KEY = 'mn-ws-ui';
 
-// bootstrap 数据形状（与 modules/home 的 bootstrap() 返回一致）
+// bootstrap 数据形状（Rust client 的 /api/bootstrap 下发；命令表形状见 ./api/contracts.ts）
 export interface BootData {
   app: { name: string; title: string; description: string; version: string };
   storePath: string;
@@ -58,7 +56,7 @@ interface StoreValue {
   boot: BootData | null;
   settings: SettingsResponse | null;
   ui: UiState;
-  client: TypedClient<typeof MODULES>;
+  client: TypedClient;
   patchUi: (patch: Partial<UiState> | ((u: UiState) => Partial<UiState>)) => void;
   refreshBoot: () => Promise<BootData>;
   refreshSettings: () => Promise<SettingsResponse>;

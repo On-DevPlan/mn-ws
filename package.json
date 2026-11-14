@@ -2,18 +2,16 @@
   "name": "mn-ws-monorepo",
   "private": true,
   "type": "module",
-  "description": "mn-ws —— HTTP ⇄ WebSocket 双向桥（monorepo：client 半 + server 半）",
+  "description": "mn-ws —— HTTP ⇄ WebSocket 双向桥（Rust 运行时；npm 壳与 React 面板在 client/）",
   "workspaces": [
-    "client",
-    "server"
+    "client"
   ],
   "scripts": {
     "build": "pnpm -r --workspace-concurrency=1 build",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
-    "dev": "pnpm --filter mn-ws dev",
-    "dev:serve": "pnpm --filter mn-ws dev:serve"
+    "dev": "pnpm --filter mn-ws dev"
   },
   "engines": {
     "node": ">=18"
