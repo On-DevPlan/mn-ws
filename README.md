@@ -39,9 +39,14 @@
 | `mn-ws` | `client/` | `npx mn-ws` | **用户自己的机器**（被桥的服务那边） |
 | `mn-ws-server` | `server/` | `npx mn-ws-server` | **公网机**（中继） |
 
-两端说的是**同一套帧协议**，协议定义只写一份 —— 放在 `mn-ws-server` 包里，
-client 半以 workspace 依赖引入（`import { FRAME } from 'mn-ws-server/protocol'`）。
-改协议 = 改两端，所以协议改动必须先想清楚兼容性。
+两端说的是**同一套帧协议**，协议定义只写一份 —— 在 `rust/mn-ws-core/` 这个
+crate 里，两半都依赖它。改协议 = 改一处，所以协议改动必须先想清楚兼容性。
+
+**运行时零 Node 依赖**：两个包分发的都是**原生二进制**（Rust 编译），
+装完直接用，机器上**不必有 Node**。React 面板是**构建期**产物，
+由 client 半的原生二进制当静态资源服务器伺服。
+
+> 迁移细节见 [`docs/RUST-PORT.md`](docs/RUST-PORT.md)。
 
 ---
 
@@ -64,9 +69,19 @@ curl -H 'X-Mn-Ws-Token: <门禁TOKEN>' \
 
 ```bash
 pnpm install
-pnpm -r build          # 两个包都要构建（client 依赖 server 的类型）
+pnpm -r build                            # 两个包的 TS 产物（前端 + 类型）
+cd rust && cargo build --release         # 两个原生二进制
 pnpm --filter mn-ws-server test
-pnpm --filter mn-ws dev  # vite + 后端 tsx 直跑源码
+pnpm --filter mn-ws test:unit
+pnpm --filter mn-ws dev                  # vite + 后端 tsx 直跑源码
+```
+
+**Rust 侧**（协议层 / 两半的实现）：
+
+```bash
+cd rust
+cargo test --release                    # 75 例（含端到端）
+cargo build --release                   # 两个二进制（各约 6MB）
 ```
 
 ---
@@ -343,10 +358,21 @@ POST /auth/oidc/callback
 
 ```bash
 pnpm install
-pnpm -r build                            # 两个包
-pnpm --filter mn-ws-server test          # 35 例（协议 / 端到端 / 鉴权 / 多路复用 / 业务令牌 / 心跳）
-pnpm --filter mn-ws test:unit            # 68 例（配置 / 账号簿 / PKCE / 白名单 / 面板）
+pnpm -r build                            # 两个包的 TS 产物（前端 + 类型）
+pnpm --filter mn-ws-server test          # 37 例（协议 / 端到端 / 鉴权 / 多路复用 / 业务令牌 / 心跳）
+pnpm --filter mn-ws test:unit            # 79 例（配置 / 账号簿 / PKCE / 白名单 / 面板）
+pnpm --filter mn-ws test:cross           # 交叉兼容：TS ↔ Rust 两个方向
+pnpm --filter mn-ws test:panel           # Rust 面板实测：伺服 React 产物 + 全部 API 端点
 pnpm --filter mn-ws test:e2e             # 打已部署的公网 server 半做远端验收
+
+cd rust && cargo test --release          # 75 例（协议层 / 两半 / 端到端）
 ```
 
-设计文档：[docs/design.md](docs/design.md) · 部署手册：[docs/DEPLOY.md](docs/DEPLOY.md)
+**分发实测**（打包 → 装到隔离目录 → **移除 PATH 里的 node** → 跑）：
+
+```bash
+node scripts/verify-dist.mjs
+```
+
+设计文档：[docs/design.md](docs/design.md) · 部署手册：[docs/DEPLOY.md](docs/DEPLOY.md) ·
+Rust 化记录：[docs/RUST-PORT.md](docs/RUST-PORT.md)
