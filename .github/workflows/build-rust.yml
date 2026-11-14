@@ -174,8 +174,12 @@ jobs:
       # client 包要带 React 构建产物（面板的静态资源）。
       # ⚠️ 必须在「装 Rust 产物」**之前** —— install-rust-bin.mjs 会把
       #    client/dist/web/public 拷进 client/web/public，产物不在那儿会直接报错。
-      - name: 构建前端产物
-        run: pnpm --filter mn-ws build
+      #
+      # ⚠️ server 半也要构建：client 的 TS 代码（core/bridge.ts 等，交叉兼容测试
+      #    的对照物）import `mn-ws-server/protocol` —— 那是 workspace 链接，
+      #    指向 server/dist/*.js，不构建就找不到模块。
+      - name: 构建 TS 产物
+        run: pnpm -r --workspace-concurrency=1 build
 
       - name: 装 Rust 产物进 npm 包并改写 bin 字段
         shell: bash

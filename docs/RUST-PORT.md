@@ -221,3 +221,48 @@ server 半的 `~/.mn-ws/server.json`、环境变量前缀 `MN_WS_`、三道安�
 
 切流稳定、且确认没有旧版本 client 在跑之后，TS server 半才可以退役。
 那之前它是**活的对照组**，不是死代码。
+
+---
+
+## 8. 分发结构
+
+```
+server 半   →  Docker 镜像（公网机上的服务，npm 包对它没有意义）
+              server/package.json 标 private:true，不发 npm
+              npm 上的 mn-ws-server 停在 0.6.x
+
+client 半   →  npm 包（一条命令装上，这是 npm 唯一的作用）
+              bin/mn-ws[.exe]   原生二进制
+              web/public/       React 构建产物
+              运行时零依赖：不需要 npm 装任何运行时依赖
+```
+
+client 不再依赖 `mn-ws-server` —— 之前它依赖 `mn-ws-server@workspace:*`，
+意味着 server 半不发布的话 **client 就装不上**（ETARGET）。
+现在 mn-ws-server 在 client 的 devDependencies 里（本地 workspace 链接），
+只服务交叉兼容测试。
+
+---
+
+## 9. 一次线上事故：镜像里打进的是占位产物
+
+**症状**：镜像构建成功、能 load、容器能 start，但容器反复 `Restarting (0)`、
+健康检查永远不过、**日志全空**。
+
+**根因**：Dockerfile 的多阶段构建是「先占位预编译依赖，再编真源码」。
+cargo 按**指纹**决定要不要重编 —— 第二步 Cargo.toml/依赖/target 都没变，
+cargo 认为产物是新鲜的，**直接复用了占位产物**（`fn main() {}`）。
+
+跑起来什么都不干 → exit 0 → `--restart unless-stopped` 反复拉起。
+
+**修法**：
+
+1. 占位编完**清掉 `target/`** —— 让真源码必然重编。
+2. 构建末尾加 `&& ./target/release/mn-ws-server --version` ——
+   **构建时就验证二进制真的能跑**，这类问题再也溜不到线上。
+
+**教训**：多阶段构建里，「用假的源文件预热依赖层」是个陷阱 ——
+cargo 的增量判断不认「源文件内容变了」。要么清 target，要么在构建末尾自检产物。
+
+已回滚到 TS 版镜像恢复服务。
+
