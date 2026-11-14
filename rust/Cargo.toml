@@ -22,7 +22,7 @@ resolver = "2"
 members = ["mn-ws-core", "mn-ws-client", "mn-ws-server"]
 
 [workspace.package]
-version = "0.7.6"
+version = "0.7.8"
 edition = "2021"
 license = "MIT"
 
