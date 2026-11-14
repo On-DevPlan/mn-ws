@@ -16,8 +16,8 @@
 # ## 触发
 #
 #   · push 到 main 且改了 rust/ 或本文件 → 编译校验（不发布）
-#   · 打 tag v* → 编译 + 上传产物到 Release
-#   · 手动触发 → 只编译，留 artifact
+#   · 打 tag v* → 四平台编译 + pack 校验
+#   · 手动触发 → 同上
 #
 # 发布到 npm 由 `release.yml` 负责（它还要处理版本号与 npm 的分阶段提升）。
 
@@ -205,47 +205,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: mn-ws-${{ matrix.artifact }}
-          path: |
-            dist-pack/*.tgz
-            rust/target/${{ matrix.target }}/release/mn-ws*
-          if-no-files-found: error
-
-  # ── 打 tag 时把产物挂到 GitHub Release ──
-  release:
-    name: 上传 Release 产物
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: 挂到 Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          # ⚠️ find 的 -o 要加括号分组，且必须配 -type f —— 否则目录也会被当产物
-          FILES=$(find artifacts -type f \( -name '*.tgz' -o -name 'mn-ws*' \) | tr '\n' ' ')
-          echo "产物：$FILES"
-          # 先查再建：两个 tag 工作流（本流水线与 release.yml）都会碰 release，重复建会撞
-          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
-            || gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --generate-notes
-          # 上传与建 release 分开做 —— 刚建的 release 偶尔还没就绪，重试几次
-          for i in 1 2 3; do
-            if gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" --clobber $FILES; then
-              echo "release $TAG 已挂上产物"
-              exit 0
-            fi
-            echo "上传失败，重试 $i/3"; sleep 5
-          done
-          exit 1
+      # ── 不把产物挂到 GitHub Release ──
+      #
+      # 分发渠道只有两条：npm（client 半，per-platform 包内带原生二进制）
+      # 与 Docker 镜像（server 半）。GitHub Release 只留 tag 与 notes
+      # （由 release.yml 建）—— 二进制不上（资产名平铺，多平台同名必撞）。
+      # 打包这步仅用于在 CI 真环境里验证 `pnpm pack` 能出正确的包。
