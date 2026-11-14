@@ -1,6 +1,6 @@
 {
   "name": "mn-ws-win32-x64",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "mn-ws 原生二进制（win32-x64）—— 由主包 mn-ws 的启动器按平台解析调用，不单独使用",
   "license": "MIT",
   "os": ["win32"],
