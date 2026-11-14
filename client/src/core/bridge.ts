@@ -220,6 +220,17 @@ export interface WsBridgeClientOptions {
   apps?: Record<string, BridgeApp>;
   logger?: BridgeLogger | null;
   onStatus?: (s: BridgeStatus) => void;
+  /**
+   * WebSocket 实现的注入点（测试用）。
+   *
+   * 为什么要有：`ws` 是模块级 import，单测没法替换它 ——
+   * 于是「鉴权失败时停止重连」这类**只在 close 回调里发生**的行为
+   * 根本测不了（连真服务器会把断言建立在网络时序上）。
+   * 注入之后，测试能用假的 socket 精确触发 close(4403)。
+   *
+   * 与 mn-rt 的 client/lib/ws-client.js 同款（那边叫 WebSocketImpl）。
+   */
+  WebSocketImpl?: typeof WebSocket;
 }
 
 /**
@@ -249,6 +260,8 @@ export class WsBridgeClient {
   pongPending = false;
   state: BridgeStatus['state'] = 'idle';
   bridge: BridgeClient;
+  /** WebSocket 实现（可注入，测试用）。 */
+  private readonly _WS: typeof WebSocket;
 
   constructor({
     url,
@@ -258,6 +271,7 @@ export class WsBridgeClient {
     apps = {},
     logger = null,
     onStatus,
+    WebSocketImpl,
   }: WsBridgeClientOptions) {
     this.url = url;
     this.token = token;
@@ -266,6 +280,7 @@ export class WsBridgeClient {
     this.apps = apps;
     this.logger = logger;
     this.onStatus = onStatus || (() => {});
+    this._WS = WebSocketImpl || WebSocket;
 
     this.bridge = new BridgeClient({
       apps,
@@ -315,7 +330,7 @@ export class WsBridgeClient {
 
     let ws: WebSocket;
     try {
-      ws = new WebSocket(this.url, { handshakeTimeout: 15_000 });
+      ws = new this._WS(this.url, { handshakeTimeout: 15_000 });
     } catch (e) {
       this._scheduleReconnect(`连接失败：${(e as Error).message}`);
       return;
@@ -359,6 +374,27 @@ export class WsBridgeClient {
       this._stopHeartbeat();
       this.bridge.abortAll();
       if (this.stopped) { this._setState('stopped'); return; }
+      // 4403 = 注册被拒（设备令牌无效/过期/被吊销）。
+      //
+      // ⚠️ 这里必须**停止重连**，不能像网络抖动那样退避重试：
+      //   重连用的是**同一枚令牌**（this.token 在起桥时取一次就不再变），
+      //   而令牌无效是**确定性**失败 —— 再连一百次也是同样的 4403。
+      //   无限重连的表现是「面板一直显示重连中，日志刷屏」，
+      //   而真正要用户做的事（重新 auth login）一句提示都不会有。
+      //
+      // 与 mn-rt 的 client/lib/ws-client.js 同款处置（那边还多一个 4401：
+      // 统一登录未通过）。对齐的意义是「同族项目的同一个失败码，行为一致」。
+      if (code === 4403) {
+        this.logger?.error(
+          '注册被服务端拒绝（设备令牌无效、已过期或已被吊销），已停止重连；请重新 auth login',
+          { code, reason: reason.length ? reason.toString() : '' },
+        );
+        this._setState('error', {
+          error: 'invalid_token',
+          reason: '设备令牌无效或已过期，请重新登录（mn-ws auth login）',
+        });
+        return;
+      }
       this._scheduleReconnect(`连接断开（${code}${reason.length ? ` ${reason.toString()}` : ''}）`);
     });
 
