@@ -164,7 +164,19 @@ fn serve(args: &Args) -> i32 {
 
         // 面板 + 桥在同一个进程里：面板的 /api/* 操作的正是这条桥。
         let handle = bridge::start_bridge(&cfg, &resolved).await;
-        let port = match control::serve_panel(web_port, handle.clone(), no_open).await {
+
+        // 面板的登录态管理器：跨请求共享（起流程与收回调是两次请求）。
+        let session = std::sync::Arc::new(session::SessionManager::new());
+        // 复用 CLI 已存的登录态 —— 「命令行登一次，面板直接能用」。
+        session.adopt_from_account_store(&cfg);
+
+        let port = match control::serve_panel_with_session(
+            web_port,
+            handle.clone(),
+            session,
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("面板起不来: {e}");

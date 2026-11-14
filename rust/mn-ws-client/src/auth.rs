@@ -155,7 +155,7 @@ pub async fn fetch_idp_config(server_http: &str) -> Result<IdpConfig, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(IdpConfig {
+    let cfg = IdpConfig {
         enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false),
         issuer: g("issuer"),
         client_id: g("clientId"),
@@ -165,7 +165,159 @@ pub async fn fetch_idp_config(server_http: &str) -> Result<IdpConfig, String> {
         authorization_endpoint: g("authorizationEndpoint"),
         token_endpoint: g("tokenEndpoint"),
         idp_available: v.get("idpAvailable").and_then(|x| x.as_bool()).unwrap_or(false),
-    })
+    };
+    if !cfg.enabled {
+        return Err(
+            "服务端未开启统一登录（MN_WS_AUTH_ENABLED）。旧用法仍可用：mn-ws --token <门禁token>"
+                .into(),
+        );
+    }
+    if cfg.issuer.is_empty() || cfg.client_id.is_empty() {
+        return Err(format!("服务端统一登录配置不完整：{v}"));
+    }
+    Ok(cfg)
+}
+
+/// 发起授权码流程时该用的 client_id。
+///
+/// 两端拆开之后：**server 半有它自己的身份**（mn-ws-server），而真正发起
+/// 授权码流程的是 **client 半**（mn-ws-client）。server 半通过 /auth/oidc/config
+/// 把后者一并发布出来，所以新装的 client 半不需要额外配置。
+///
+/// 回落 `client_id`：老的 server 只发布一个 client_id，那时的登录用的就是它。
+pub fn login_client_id_of(cfg: &IdpConfig) -> String {
+    if !cfg.login_client_id.trim().is_empty() {
+        return cfg.login_client_id.trim().to_string();
+    }
+    cfg.client_id.trim().to_string()
+}
+
+/// 组 authorize URL。
+///
+/// 与 TS 版 `buildAuthorizeUrl` 逐条对齐：参数用 `searchParams.set`
+/// （同名覆盖，不追加），`scope` 是空格分隔的多个值。
+pub fn build_authorize_url(
+    cfg: &IdpConfig,
+    pkce: &Pkce,
+    redirect_uri: &str,
+    prompt_login: bool,
+) -> String {
+    let endpoint = if cfg.authorization_endpoint.is_empty() {
+        format!("{}/oauth2/auth", cfg.issuer)
+    } else {
+        cfg.authorization_endpoint.clone()
+    };
+    let scopes = if cfg.scopes.is_empty() {
+        "openid profile email".to_string()
+    } else {
+        cfg.scopes.join(" ")
+    };
+    let client_id = login_client_id_of(cfg);
+    let mut out = format!(
+        "{endpoint}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&nonce={}&code_challenge={}&code_challenge_method=S256",
+        urlencode(&client_id),
+        urlencode(redirect_uri),
+        urlencode(&scopes),
+        urlencode(&pkce.state),
+        urlencode(&pkce.nonce),
+        urlencode(&pkce.challenge),
+    );
+    if prompt_login {
+        out.push_str(&format!("&prompt={}", urlencode("login")));
+    }
+    out
+}
+
+/// 收回调：用 code + verifier 换 access_token。
+///
+/// state 不匹配只有两种可能：回调被串了，或有人在伪造一次登录完成。都必须中止。
+pub async fn finish_oauth(
+    cfg: &IdpConfig,
+    pkce: &Pkce,
+    code: &str,
+    state: &str,
+    redirect_uri: &str,
+) -> Result<String, String> {
+    if state != pkce.state {
+        return Err("state 不一致，已中止登录".into());
+    }
+    let client_id = login_client_id_of(cfg);
+    if client_id.is_empty() {
+        return Err("服务端未发布登录用的 client_id（loginClientId / clientId）".into());
+    }
+    let endpoint = if cfg.token_endpoint.is_empty() {
+        format!("{}/oauth2/token", cfg.issuer)
+    } else {
+        cfg.token_endpoint.clone()
+    };
+    // 表单编码（公共客户端 + PKCE，**不发 client_secret**）。
+    let form = format!(
+        "grant_type=authorization_code&code={}&client_id={}&redirect_uri={}&code_verifier={}",
+        urlencode(code),
+        urlencode(&client_id),
+        urlencode(redirect_uri),
+        urlencode(&pkce.verifier),
+    );
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&endpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send()
+        .await
+        .map_err(|e| format!("换 token 失败：{e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let tok: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let access_token = tok
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if status >= 400 || access_token.is_empty() {
+        let err = tok.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        return Err(if err.is_empty() {
+            format!("换 token 失败：{text}")
+        } else {
+            format!("换 token 失败：{err}")
+        });
+    }
+    Ok(access_token)
+}
+
+/// 用 access_token 换 mn-ws 自己的设备令牌。
+///
+/// 这一步是**跨机**的（client → 公网机），走的明文 HTTP 时中间人能看到
+/// 那枚 access_token —— 它 10 分钟有效，但窗口内被截获就等于账号接管。
+/// 所以部署侧必须前置 TLS（见 docs/DEPLOY.md 的「已知风险」）。
+pub async fn verify_exchange(
+    server_http: &str,
+    access_token: &str,
+    client_id: &str,
+    device_name: &str,
+) -> Result<Value, String> {
+    let base = server_http.trim_end_matches('/');
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/auth/verify"))
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Content-Type", "application/json")
+        .json(&json!({ "clientId": client_id, "deviceName": device_name }))
+        .send()
+        .await
+        .map_err(|e| format!("换设备令牌失败：{e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if status >= 400 || v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
+        return Err(if err.is_empty() {
+            format!("换设备令牌失败：{text}")
+        } else {
+            format!("换设备令牌失败：{err}")
+        });
+    }
+    Ok(v)
 }
 
 /// 登录统一登录平台。

@@ -24,6 +24,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
@@ -103,6 +104,18 @@ pub async fn serve_panel(
     handle: BridgeHandle,
     _no_open: bool,
 ) -> std::io::Result<u16> {
+    serve_panel_with_session(port, handle, Arc::new(session::SessionManager::new())).await
+}
+
+/// 起面板服务（带登录态管理器）。
+///
+/// 面板登录流程要**跨请求**保持状态（起流程是一次请求，收回调是另一次），
+/// 所以管理器得在所有请求间共享 —— 这里用 `Arc` 传进每个连接的闭包里。
+pub async fn serve_panel_with_session(
+    port: u16,
+    handle: BridgeHandle,
+    session: Arc<session::SessionManager>,
+) -> std::io::Result<u16> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual = listener.local_addr()?.port();
@@ -116,13 +129,18 @@ pub async fn serve_panel(
     //    所以这里留一个工厂函数，而不是造好一个 svc 反复用。
     let web_for_svc = web.clone();
     let handle_for_svc = handle.clone();
+    let session_for_svc = session.clone();
     let make_svc = move || {
         let web = web_for_svc.clone();
         let handle = handle_for_svc.clone();
+        let session = session_for_svc.clone();
         service_fn(move |req: Request<Incoming>| {
             let web = web.clone();
             let handle = handle.clone();
-            async move { Ok::<_, Infallible>(route(req, web, handle).await) }
+            let session = session.clone();
+            async move {
+                Ok::<_, Infallible>(route(req, web, handle, session, actual).await)
+            }
         })
     };
 
@@ -141,17 +159,27 @@ pub async fn serve_panel(
     Ok(actual)
 }
 
-/// 路由：静态资源 + `/api/*`。
+/// 路由：静态资源 + `/api/*` + `/callback`。
 async fn route(
     req: Request<Incoming>,
     web: PathBuf,
     handle: BridgeHandle,
+    session: Arc<session::SessionManager>,
+    panel_port: u16,
 ) -> Response<Full<Bytes>> {
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
+    // ── OIDC 回调：浏览器把授权码送回面板的 /callback ──
+    //
+    // 放在 /api 之前：它不是 API，是认证中心指定的固定回调地址。
+    // 路径固定 /callback、端口通配 —— 与 go-ah 里 mn-ws-client 的白名单一致。
+    if path == "/callback" {
+        return callback(req, session).await;
+    }
+
     if path.starts_with("/api/") {
-        return api(req, &path, &method, handle).await;
+        return api(req, &path, &method, handle, session, panel_port).await;
     }
     if method != Method::GET && method != Method::HEAD {
         return text_response(StatusCode::METHOD_NOT_ALLOWED, "只支持 GET");
@@ -207,6 +235,8 @@ async fn api(
     path: &str,
     method: &Method,
     handle: BridgeHandle,
+    session: Arc<session::SessionManager>,
+    panel_port: u16,
 ) -> Response<Full<Bytes>> {
     let cfg = config::read_config_file();
     let resolved = config::resolve_apps(&cfg);
@@ -230,12 +260,28 @@ async fn api(
         ("PATCH", "/api/settings") => set_settings(&params),
 
         // ── auth ──
-        ("POST", "/api/auth/login/start") => Ok(json!({
-            "ok": true,
-            "pending": true,
-            "via": "panel",
-            "error": "面板登录流程尚未在 Rust 版实现；请用 `mn-ws auth login`（命令行）",
-        })),
+        ("POST", "/api/auth/login/start") => {
+            // 起一次授权码流程并弹浏览器；**立刻返回**（不阻塞 HTTP 请求），
+            // 回调落在面板自己的 /callback 上。
+            let prompt_login = params
+                .get("newAccount")
+                .map(|v| v == &json!(true) || v.as_str() == Some("true"))
+                .unwrap_or(false);
+            match session.start_login(&cfg, panel_port, prompt_login).await {
+                Ok(authorize_url) => Ok(json!({
+                    "ok": false,
+                    "pending": true,
+                    "authorizeUrl": authorize_url,
+                    "via": "panel",
+                })),
+                Err(e) => Ok(json!({
+                    "ok": false,
+                    "pending": false,
+                    "error": e,
+                    "via": "panel",
+                })),
+            }
+        }
         ("GET", "/api/auth/accounts") => Ok(accounts_view(&cfg)),
         ("POST", "/api/auth/switch") => auth_switch(&cfg, &params),
         ("GET", "/api/auth/status") => Ok(auth_status(&cfg)),
@@ -992,6 +1038,81 @@ fn merge_params(query: Map<String, Value>, body: &Value) -> Map<String, Value> {
         }
     }
     out
+}
+
+/// 处理 OIDC 回调：收回调 → 换 access_token → 换设备令牌 → 存账号簿。
+///
+/// 失败时**如实说失败**：页面显示错误 + 原因，而不是一个「登录成功」的假象。
+async fn callback(
+    req: Request<Incoming>,
+    session: Arc<session::SessionManager>,
+) -> Response<Full<Bytes>> {
+    let cfg = config::read_config_file();
+    let q = query_of(&req);
+    let code = q.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let state = q.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let err = q.get("error").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    if !err.is_empty() {
+        return html_response(
+            StatusCode::OK,
+            &format!(
+                "<h3>授权未通过</h3><p>{}</p><p>可以关闭这个页面了。</p>",
+                escape_html(&err)
+            ),
+        );
+    }
+
+    match session.complete_login(&cfg, &code, &state).await {
+        Ok(s) => {
+            let who = if !s.nickname.is_empty() {
+                s.nickname.clone()
+            } else if !s.email.is_empty() {
+                s.email.clone()
+            } else if !s.user_id.is_empty() {
+                s.user_id.clone()
+            } else {
+                "已登录".to_string()
+            };
+            html_response(
+                StatusCode::OK,
+                &format!(
+                    "<h3>✅ 已登录</h3><p>{}</p><p>可以关闭这个页面，回到面板了。</p>",
+                    escape_html(&who)
+                ),
+            )
+        }
+        Err(e) => {
+            session.cancel_login();
+            html_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "<h3>登录失败</h3><p>{}</p><p>可以关闭这个页面，回到面板重试。</p>",
+                    escape_html(&e)
+                ),
+            )
+        }
+    }
+}
+
+/// 最小 HTML 转义：回调页会回显错误文本，不能让它变成可执行脚本。
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// 一个 HTML 响应。
+fn html_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
+    let mut resp = Response::new(Full::new(Bytes::from(body.to_string())));
+    *resp.status_mut() = status;
+    resp.headers_mut().insert(
+        hyper::header::CONTENT_TYPE,
+        hyper::header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp
 }
 
 /// 一个纯文本响应。

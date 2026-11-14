@@ -6,6 +6,10 @@ license.workspace = true
 description = "mn-ws client 半：把本机的 HTTP 服务桥给远端 HTTP 客户端（Rust 实现，运行时零 Node 依赖）"
 publish = false
 
+[lib]
+name = "mn_ws_client"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mn-ws"
 path = "src/main.rs"

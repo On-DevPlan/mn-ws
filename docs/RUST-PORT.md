@@ -87,13 +87,14 @@ CI（`.github/workflows/build-rust.yml`）编译四个平台：
 
 ## 4. 怎么验证的
 
-### 4.1 单测（75 条）
+### 4.1 单测（83 条）
 
 ```
 mn-ws-core     19 条   协议层：帧编解码、头的规范化/剥离、app 路由规则
-mn-ws-client   27 条   配置、账号簿、面板 API、存储、常用应用
+mn-ws-client   30 条   配置、账号簿、面板 API、存储、常用应用、登录态
 mn-ws-server   21 条   配置解析、日志、审计落盘、设备令牌签发/校验
 e2e             8 条   真起服务、真打穿
+面板登录         5 条   假认证中心跑完整 PKCE 流程
 ```
 
 ### 4.2 端到端（`rust/mn-ws-server/tests/e2e.rs`）
@@ -128,13 +129,14 @@ e2e             8 条   真起服务、真打穿
 
 ## 5. 现在的边界
 
-### 5.1 面板登录流程还没做
+### 5.1 面板登录流程已实现，但与 TS 版有一处**刻意的**不同
 
-`POST /api/auth/login/start` 目前返回一个「尚未实现」的提示。
-原因：面板登录需要**在面板自己的端口上**接浏览器回调（端口是运行时选的，
-另起一个端口浏览器回不去），而 Rust 侧的 CLI 登录走的是**另一个随机端口**。
-这条路径要单独实现 —— 但 **CLI 登录（`mn-ws auth login`）是通的**，
-面板与 CLI 复用同一份账号簿，所以不影响主流程。
+Rust 版的面板登录（`POST /api/auth/login/start` → 浏览器 → `/callback`）已实现，
+用假认证中心做了端到端验证（`rust/mn-ws-client/tests/panel_login.rs`）。
+
+**不同点**：client 半自己换码后，**不调 userinfo** —— 直接拿 access_token
+去 server 半换设备令牌。TS 版也是这样（userinfo 是 server 半换码时的步骤）。
+少一次往返，也少一处「认证中心的凭据要传多远」。
 
 ### 5.2 skill 模块没进 Rust
 

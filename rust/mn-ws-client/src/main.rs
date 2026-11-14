@@ -18,25 +18,7 @@
 //! 运行时**零 Node 依赖**：本进程是原生二进制，React 面板是构建期产物，
 //! 由本进程当静态资源服务器伺服。
 
-mod apps;
-mod auth;
-mod bridge;
-mod cli;
-mod config;
-mod control;
-mod data_plane;
-mod favorites;
-mod session;
-mod store;
-mod views;
-
-/// 共享协议层：帧格式与 app 路由规则。
-///
-/// server 半也依赖同一个 crate —— 协议只有**一份实现**，
-/// 「帧能解、字段对不上」的静默漂移在结构上就不可能发生。
-///
-/// 整块重新导出，这样 `protocol::frame_type::X` 这类路径与之前一致。
-pub use mn_ws_core::protocol;
+use mn_ws_client::cli;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

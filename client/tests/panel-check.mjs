@@ -226,6 +226,23 @@ async function main() {
       missing.status === 404 && missingJson.ok === false && !!missingJson.code,
       `status=${missing.status} body=${JSON.stringify(missingJson).slice(0, 160)}`,
     );
+
+    // ── OIDC 回调路由：没有进行中的登录时必须明确报出来 ──
+    const cb = await fetch(`${base}/callback?code=X&state=Y`);
+    const cbText = await cb.text();
+    check(
+      '/callback 路由存在（无进行中的登录 → 400 + 说明）',
+      cb.status === 400 && cbText.includes('登录失败'),
+      `status=${cb.status} body=${cbText.slice(0, 160)}`,
+    );
+    // 授权被拒时是 200 + 「授权未通过」
+    const cbErr = await fetch(`${base}/callback?error=access_denied`);
+    const cbErrText = await cbErr.text();
+    check(
+      '/callback 收到 error → 200 + 授权未通过',
+      cbErr.status === 200 && cbErrText.includes('授权未通过'),
+      `status=${cbErr.status} body=${cbErrText.slice(0, 160)}`,
+    );
   } finally {
     panel.kill();
   }
