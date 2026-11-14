@@ -293,6 +293,7 @@ mod tests {
             "auth.switch",
             "auth.status",
             "auth.logout",
+            "auth.prune",
             "bridge.status",
             "bridge.apps",
             "bridge.whitelist.set",

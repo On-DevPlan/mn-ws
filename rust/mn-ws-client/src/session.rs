@@ -275,12 +275,22 @@ impl SessionManager {
 pub fn adopt_from_account_store(cfg: &Map<String, Value>) -> Option<PanelSession> {
     let accounts = config::with_accounts(cfg);
     let active_key = cfg.get("activeAccount").and_then(|v| v.as_str()).unwrap_or("");
-    let entry = accounts
-        .iter()
-        .find(|(k, _)| k == active_key)
-        .map(|(_, e)| e)
-        .or_else(|| accounts.first().map(|(_, e)| e))?;
-    if entry.device_token.is_empty() || config::is_expired(entry) {
+    // 有明确指向时**只认那一条**：它不可用就如实报「未登录」，不偷偷换成
+    // 本机另一个账号 —— 那把 A 的令牌当成 B 在用，比不登录更难查。
+    // 没有指向（首次登录前/刚 logout）才在可用条目里挑最近登录的那条。
+    let entry = if active_key.is_empty() {
+        accounts
+            .iter()
+            .filter(|item| config::is_usable(&item.1))
+            .max_by_key(|item| item.1.login_at)
+            .map(|item| &item.1)
+    } else {
+        accounts
+            .iter()
+            .find(|item| item.0.as_str() == active_key)
+            .map(|item| &item.1)
+    }?;
+    if !config::is_usable(entry) {
         return None;
     }
     Some(PanelSession {
@@ -329,6 +339,15 @@ pub fn save_auth_account(
     cfg: &Map<String, Value>,
     entry: &config::AccountEntry,
 ) -> Result<(), String> {
+    // 守住根：登录结果里既没有 userId 也没有邮箱时，写进去只会变成一条
+    // 「无令牌/无账号信息」的残骸 —— 列在账号簿里标过期、给「切到它」按钮，
+    // 用户切完就丢登录态。宁可不写，让调用方如实报错。
+    if entry.device_token.trim().is_empty()
+        && entry.user_id.trim().is_empty()
+        && entry.email.trim().is_empty()
+    {
+        return Err("登录结果里没有设备令牌，也没有 userId/邮箱 —— 未写入账号簿".into());
+    }
     let mut raw = cfg.clone();
     let mut accounts = match raw.get("accounts") {
         Some(Value::Object(m)) => m.clone(),

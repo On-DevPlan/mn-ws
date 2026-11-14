@@ -702,16 +702,35 @@ fn auth_cmd(rest: &[&str], args: &Args) -> i32 {
                     lines.push("  （本机还没有已存账号。登录一次: mn-ws auth login）".to_string());
                 } else {
                     for (key, e) in &accounts {
+                        // 三种状态分开报：「没有令牌」不是「过期」，把它标成过期
+                        // 会让用户去点「切到它」，切完反而丢掉登录态。
+                        let orphan = config::is_orphan(e);
+                        let label = if orphan {
+                            format!("（无账号信息 · {key}）")
+                        } else {
+                            config::label_of(e)
+                        };
+                        let state = if orphan {
+                            "[残留] "
+                        } else if config::is_expired(e) {
+                            "[已过期] "
+                        } else {
+                            ""
+                        };
                         let mut line = format!(
-                            "  {} {}{}",
-                            config::label_of(e),
-                            if key == active { "[当前] " } else { "" },
-                            if config::is_expired(e) { "[已过期] " } else { "" }
+                            "  {label} {}{state}",
+                            if key == active { "[当前] " } else { "" }
                         );
-                        if e.email != config::label_of(e) {
+                        if !orphan && e.email != config::label_of(e) {
                             line.push_str(&format!("  {}", e.email));
                         }
                         lines.push(line);
+                    }
+                    let orphans = accounts.iter().filter(|item| config::is_orphan(&item.1)).count();
+                    if orphans > 0 {
+                        lines.push(format!(
+                            "  （{orphans} 条残留记录没有设备令牌，切过去等于退出登录 —— mn-ws auth prune 清掉）"
+                        ));
                     }
                 }
                 lines.join("\n")
@@ -801,6 +820,29 @@ fn auth_cmd(rest: &[&str], args: &Args) -> i32 {
                 Err(e) => commands::emit_error(&e.message, e.code, json_mode),
             }
         }
+        ["prune"] => {
+            let params = serde_json::Map::new();
+            match control::auth_prune(&cfg, &params) {
+                Ok(data) => {
+                    let removed: Vec<String> = data["removed"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default();
+                    let remaining = data["remaining"].as_u64().unwrap_or(0);
+                    let text = if removed.is_empty() {
+                        format!("账号簿里没有残留记录（现有 {remaining} 个账号）")
+                    } else {
+                        format!(
+                            "已清掉 {} 条残留记录：{}\n还剩 {remaining} 个账号",
+                            removed.len(),
+                            removed.join("、")
+                        )
+                    };
+                    commands::emit(commands::Outcome { data, text }, json_mode)
+                }
+                Err(e) => commands::emit_error(&e.message, e.code, json_mode),
+            }
+        }
         ["login"] => {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(r) => r,
@@ -847,6 +889,7 @@ fn print_help() {
     println!("  auth switch <账号> 切换账号");
     println!("  auth status        看当前身份");
     println!("  auth logout        清空登录凭据");
+    println!("  auth prune         清掉账号簿里的残留记录");
     println!("  bootstrap show     一次取齐面板启动所需的全部上下文");
     println!("  routes             列出 CLI 命令与 HTTP 路由的对照表");
     println!("  health             自检：存储目录是否可写");
@@ -885,12 +928,13 @@ fn print_sub_help(sub: Option<&str>) {
              known  列出已登记的应用"
         ),
         "auth" => println!(
-            "mn-ws auth login|list|switch|status|logout\n\n\
+            "mn-ws auth login|list|switch|status|logout|prune\n\n\
              login  登录统一登录平台（浏览器授权）\n\
              list   列出已存账号\n\
              switch mn-ws auth switch <账号>\n\
              status 看当前身份\n\
-             logout 清空本机登录凭据"
+             logout 清空本机登录凭据\n\
+             prune  清掉账号簿里没有令牌的残留记录（切过去会丢登录态的那些）"
         ),
         "setting" => println!(
             "mn-ws setting get|set\n\n\

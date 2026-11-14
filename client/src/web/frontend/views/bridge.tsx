@@ -404,12 +404,23 @@ export default function BridgeView() {
                   <span>
                     {a.label}
                     {a.active ? <span className="tag">当前</span> : null}
-                    {a.expired ? <span className="tag warn">已过期</span> : null}
+                    {a.orphan ? (
+                      <span className="tag">残留</span>
+                    ) : a.expired ? (
+                      <span className="tag warn">已过期</span>
+                    ) : null}
                   </span>
                   {!a.active && (
                     <button
                       className="btn small ghost"
-                      disabled={busy}
+                      disabled={busy || a.usable === false}
+                      title={
+                        a.orphan
+                          ? '这条记录没有设备令牌，切过去等于退出登录 —— 先清理残留'
+                          : a.expired
+                            ? '设备令牌已过期，切过去桥会失去凭据 —— 先重新登录'
+                            : undefined
+                      }
                       onClick={() => { void run(() => client['auth.switch']({ account: a.key })); }}
                     >
                       切到它
@@ -425,6 +436,16 @@ export default function BridgeView() {
                 >
                   退出当前账号
                 </button>
+                {accounts.some((a) => a.orphan) ? (
+                  <button
+                    className="btn small ghost"
+                    disabled={busy}
+                    title="清掉没有设备令牌的历史残留记录（它们只会冒充「已过期账号」）"
+                    onClick={() => { void run(() => client['auth.prune']({})); }}
+                  >
+                    清理残留
+                  </button>
+                ) : null}
               </div>
             </>
           )}

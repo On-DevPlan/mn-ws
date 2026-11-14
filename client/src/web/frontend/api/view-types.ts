@@ -83,7 +83,19 @@ export interface CatalogView {
 
 /** 统一登录账号簿（/api/auth/accounts）。 */
 export interface AccountsView {
-  accounts: { key: string; label: string; userId?: string; email?: string; expired: boolean; active: boolean }[];
+  accounts: {
+    key: string;
+    label: string;
+    userId?: string;
+    email?: string;
+    /** 有令牌但过期了。没有令牌的条目不进这个字段（那是 orphan）。 */
+    expired: boolean;
+    /** 没有令牌也没有账号信息的历史残留：切过去等于退出登录。 */
+    orphan?: boolean;
+    /** 有令牌且没过期，可以切过去。 */
+    usable?: boolean;
+    active: boolean;
+  }[];
   activeKey: string;
 }
 

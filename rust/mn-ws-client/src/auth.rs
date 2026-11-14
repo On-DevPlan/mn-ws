@@ -454,16 +454,35 @@ pub async fn login(cfg: &serde_json::Map<String, Value>) -> i32 {
     // 落盘到账号簿。
     let mut raw = crate::config::read_config_file();
     let user_id = v.get("userId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let email_of = v.get("email").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let device_token = v.get("token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    // 既没令牌也没账号信息的结果写进账号簿只会变成残骸：列表里标「已过期」、
+    // 还能被切过去 —— 切完就丢登录态。宁可不写。
+    if device_token.trim().is_empty()
+        && user_id.trim().is_empty()
+        && email_of.trim().is_empty()
+    {
+        eprintln!("换码成功，但返回里没有令牌也没有 userId/邮箱 —— 不写入账号簿（避免留下无法切换的残留记录）");
+        return 1;
+    }
     let account_key = if user_id.is_empty() {
         "active".to_string()
     } else {
         user_id.clone()
     };
-    let device_token = v.get("token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    // 服务端发的是 `tokenExpiresAt`（**毫秒**，server 侧 `(now+TTL)*1000`）。
+    // 这里原先读的是 `expiresAt` —— 那个字段服务端根本不发，所以每次都落进
+    // 本地推算分支：TTL 若在服务端被调整过，本机就还按 90 天算，令牌提前失效
+    // 而本地以为有效，症状是「隔一阵就要重登」。兼容老服务端只给秒级 expiresAt。
     let expires_at = v
-        .get("expiresAt")
+        .get("tokenExpiresAt")
         .and_then(|x| x.as_i64())
-        .unwrap_or_else(|| now_ms() / 1000 + DEVICE_TOKEN_TTL_SEC);
+        .or_else(|| {
+            v.get("expiresAt")
+                .and_then(|x| x.as_i64())
+                .map(|secs| secs.saturating_mul(1000))
+        })
+        .unwrap_or_else(|| now_ms() + DEVICE_TOKEN_TTL_SEC * 1000);
 
     let mut accounts = match raw.get("accounts") {
         Some(Value::Object(m)) => m.clone(),
@@ -484,7 +503,7 @@ pub async fn login(cfg: &serde_json::Map<String, Value>) -> i32 {
         json!(v.get("nickname").and_then(|x| x.as_str()).unwrap_or("")),
     );
     entry.insert("deviceToken".into(), json!(device_token));
-    entry.insert("expiresAt".into(), json!(expires_at * 1000));
+    entry.insert("expiresAt".into(), json!(expires_at));
     entry.insert(
         "deviceName".into(),
         json!(cfg.get("deviceName").and_then(|x| x.as_str()).unwrap_or("")),

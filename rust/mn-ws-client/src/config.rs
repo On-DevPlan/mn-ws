@@ -340,6 +340,75 @@ pub fn is_expired(e: &AccountEntry) -> bool {
     e.expires_at <= now_ms
 }
 
+/// 这条账号记录能不能真的拿来用：有设备令牌，且令牌没过期。
+///
+/// 与 `is_expired` 是**两个问题**：`is_expired` 回答「令牌过期了吗」，
+/// 而「压根没有令牌」不是过期，是历史残留（旧版本写的半截条目，或某次
+/// 登录只拿到了 clientId）。两者混在一起报「已过期」会把用户引到
+/// 「切到它」按钮上 —— 切完反而丢掉登录态，症状正是「这个登录态总是会过期」。
+pub fn is_usable(e: &AccountEntry) -> bool {
+    !e.device_token.is_empty() && !is_expired(e)
+}
+
+/// 只有键、没有任何账号字段的残留记录（无令牌、无 userId/邮箱/用户名/昵称）。
+///
+/// 这类条目既不能登录也不能切换，只会在账号列表里冒充一个「已过期账号」。
+pub fn is_orphan(e: &AccountEntry) -> bool {
+    e.device_token.is_empty()
+        && e.user_id.is_empty()
+        && e.email.is_empty()
+        && e.username.is_empty()
+        && e.nickname.is_empty()
+}
+
+/// 清掉无令牌的残留记录，返回被清掉的键。
+///
+/// 只动真正没用的条目：有令牌的（哪怕已过期）保留，用户还能靠它认出
+/// 「上次是哪个账号」。写盘由调用方决定。
+pub fn prune_orphan_accounts(raw: &mut Map<String, Value>) -> Vec<String> {
+    let mut removed: Vec<String> = Vec::new();
+    let Some(Value::Object(accounts)) = raw.get("accounts") else {
+        return removed;
+    };
+    let active = raw
+        .get("activeAccount")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut kept = Map::new();
+    for (key, v) in accounts.clone() {
+        let Some(o) = v.as_object() else { continue };
+        let g = |k: &str| o.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let e = AccountEntry {
+            user_id: g("userId"),
+            email: g("email"),
+            username: g("username"),
+            nickname: g("nickname"),
+            device_token: g("deviceToken"),
+            expires_at: o.get("expiresAt").and_then(|x| x.as_i64()).unwrap_or(0),
+            device_name: g("deviceName"),
+            client_id: g("clientId"),
+            url: g("url"),
+            server_http: g("serverHttp"),
+            login_at: o.get("loginAt").and_then(|x| x.as_i64()).unwrap_or(0),
+        };
+        if is_orphan(&e) {
+            removed.push(key);
+            continue;
+        }
+        kept.insert(key, v);
+    }
+    if !removed.is_empty() {
+        raw.insert("accounts".into(), Value::Object(kept));
+        // 当前账号指着一条残骸时，把指向一起撤掉 —— 否则桥会因为
+        // 「activeAccount 找不到对应记录」退化成静态门禁。
+        if removed.iter().any(|k| k == &active) {
+            raw.insert("activeAccount".into(), json!(""));
+        }
+    }
+    removed
+}
+
 /// 保存自定义应用列表（面板上的「添加 / 移除」走这里）。
 ///
 /// 同时把名字并进 `apps` 白名单 —— 白名单是**唯一的准入依据**。
@@ -463,5 +532,41 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].1.device_token, "tok");
         assert_eq!(a[0].1.email, "");
+    }
+
+    #[test]
+    fn orphan_is_not_the_same_as_expired() {
+        let mut orphan = AccountEntry::default();
+        orphan.client_id = "laptop-1bkctmo0-d9a7u3".into();
+        assert!(is_orphan(&orphan));
+        assert!(!is_usable(&orphan));
+        // expiresAt=0 仍然算「过期」，但界面必须靠 is_orphan 区分：
+        // 没有令牌的条目给「切到它」按钮，切完就是退出登录。
+        assert!(is_expired(&orphan));
+
+        let mut expired = AccountEntry::default();
+        expired.user_id = "6".into();
+        expired.device_token = "tok".into();
+        expired.expires_at = 1;
+        assert!(!is_orphan(&expired), "有令牌的过期账号不是残骸");
+        assert!(!is_usable(&expired));
+    }
+
+    #[test]
+    fn prune_drops_orphans_and_clears_active_pointer() {
+        let mut m = raw(&[
+            ("activeAccount", json!("laptop-x")),
+            (
+                "accounts",
+                json!({
+                    "6": {"userId": "6", "deviceToken": "tok", "expiresAt": 4_102_444_800_000_i64},
+                    "laptop-x": {"clientId": "laptop-x"}
+                }),
+            ),
+        ]);
+        let removed = prune_orphan_accounts(&mut m);
+        assert_eq!(removed, vec!["laptop-x".to_string()]);
+        assert_eq!(m["activeAccount"], json!(""), "当前账号指着残骸时要把指向一起撤掉");
+        assert_eq!(with_accounts(&m).len(), 1);
     }
 }

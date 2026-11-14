@@ -286,6 +286,7 @@ async fn api(
         ("POST", "/api/auth/switch") => auth_switch(&cfg, &params),
         ("GET", "/api/auth/status") => Ok(auth_status(&cfg)),
         ("POST", "/api/auth/logout") => auth_logout(&cfg, &params),
+        ("POST", "/api/auth/prune") => auth_prune(&cfg, &params),
 
         // ── bridge ──
         ("GET", "/api/bridge/status") => Ok(bridge_status(&cfg, &resolved, &handle)),
@@ -421,6 +422,7 @@ pub fn command_table() -> Vec<Value> {
         cmd("auth.switch", "auth", &["auth", "switch"], Some(("POST", "/api/auth/switch")), "切换当前生效账号"),
         cmd("auth.status", "auth", &["auth", "status"], Some(("GET", "/api/auth/status")), "查看当前身份"),
         cmd("auth.logout", "auth", &["auth", "logout"], Some(("POST", "/api/auth/logout")), "清除登录凭据"),
+        cmd("auth.prune", "auth", &["auth", "prune"], Some(("POST", "/api/auth/prune")), "清掉账号簿里的残留记录"),
         cmd("bridge.status", "bridge", &["status"], Some(("GET", "/api/bridge/status")), "桥接状态"),
         cmd("bridge.apps", "bridge", &["apps"], Some(("GET", "/api/bridge/apps")), "列出可桥接的应用"),
         cmd("bridge.whitelist.set", "bridge", &["apps", "set"], Some(("POST", "/api/bridge/whitelist")), "设置白名单"),
@@ -696,18 +698,26 @@ fn view_ids() -> Vec<String> {
 }
 
 /// 账号簿视图。
+///
+/// 三种状态分开报，别混成一个「已过期」：
+///   · `usable`  有令牌且没过期 —— 可以切过去
+///   · `expired` 有令牌但过期了 —— 认得出是谁，重登一次即可
+///   · `orphan`  没有令牌也没有账号信息 —— 历史残留，切换只会丢登录态
 pub fn accounts_view(cfg: &Map<String, Value>) -> Value {
     let accounts = config::with_accounts(cfg);
     let active = cfg.get("activeAccount").and_then(|v| v.as_str()).unwrap_or("");
     let list: Vec<Value> = accounts
         .iter()
         .map(|(key, e)| {
+            let orphan = config::is_orphan(e);
             json!({
                 "key": key,
                 "label": config::label_of(e),
                 "userId": e.user_id,
                 "email": e.email,
-                "expired": config::is_expired(e),
+                "expired": !orphan && config::is_expired(e),
+                "orphan": orphan,
+                "usable": config::is_usable(e),
                 "active": key == active,
             })
         })
@@ -762,6 +772,20 @@ pub fn auth_switch(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Res
     }) else {
         return Err(ApiError::not_found(format!("没有这个账号: {target}")));
     };
+    // 切过去必须真的能登录：没有令牌的残骸条目切完等于退出登录，
+    // 用户看到的是「登录态总是会过期」。这里直接挡住并说清怎么收拾。
+    if config::is_orphan(entry) {
+        return Err(ApiError::bad_input(format!(
+            "「{}」是本机账号簿里的残留记录（没有设备令牌，也没有账号信息），切过去等于退出登录 —— 用 mn-ws auth prune 清掉它",
+            config::label_of(entry)
+        )));
+    }
+    if !config::is_usable(entry) {
+        return Err(ApiError::bad_input(format!(
+            "「{}」的设备令牌已过期，切过去桥也会失去凭据 —— 先 mn-ws auth login 重新登录",
+            config::label_of(entry)
+        )));
+    }
     let mut raw = cfg.clone();
     raw.insert("activeAccount".into(), json!(key));
     config::write_config_file(&raw).map_err(|e| ApiError::bad_input(e.to_string()))?;
@@ -797,6 +821,31 @@ pub fn auth_logout(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Res
     config::write_config_file(&raw).map_err(|e| ApiError::bad_input(e.to_string()))?;
     let remaining = config::with_accounts(&raw).len();
     Ok(json!({ "ok": true, "remaining": remaining }))
+}
+
+/// 清掉账号簿里的残骸记录（无令牌、无 userId/邮箱/用户名/昵称）。
+///
+/// 这些条目只会冒充「已过期账号」：面板列出它们、给「切到它」按钮，用户切完
+/// 反而丢掉登录态。当前账号正指着残骸时，指向一并撤掉（否则桥会退化成静态门禁）。
+pub fn auth_prune(
+    cfg: &Map<String, Value>,
+    _params: &Map<String, Value>,
+) -> Result<Value, ApiError> {
+    let mut raw = cfg.clone();
+    let removed = config::prune_orphan_accounts(&mut raw);
+    if removed.is_empty() {
+        return Ok(json!({
+            "ok": true,
+            "removed": [],
+            "remaining": config::with_accounts(cfg).len(),
+        }));
+    }
+    config::write_config_file(&raw).map_err(|e| ApiError::bad_input(e.to_string()))?;
+    Ok(json!({
+        "ok": true,
+        "removed": removed,
+        "remaining": config::with_accounts(&raw).len(),
+    }))
 }
 
 /// 桥接状态。
