@@ -658,11 +658,84 @@ async fn e2e_owner_isolation_blocks_other_users() {
     )
     .await;
 
-    // u2 的令牌访问 u1 的桥 → 403
+    // u2 的令牌访问 u1 的桥 → 403（选路时的属主过滤：u2 的候选里没有自家的 PC）
     let u2_token = issue_test_token("test-secret", "u2", "dev2");
     let (status, body, _) = http_get(addr, "/nx-test/api/echo", &[("X-Mn-Ws-Token", &u2_token)]).await;
     assert_eq!(status, 403, "属主不匹配的请求必须 403");
-    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["error"], "cross_owner");
+}
+
+#[tokio::test]
+async fn e2e_same_app_two_pcs_routed_by_pc_header() {
+    // (PC, app) 复合键：两台 PC 注册同名 app **并存**，各自可路由。
+    // 不点名 → 409 ambiguous_app；点名 → 精确路由。
+    let addr = start_server(ServerOptions {
+        host: "127.0.0.1".into(),
+        port: 0,
+        token: "gate-token".into(),
+        jwt_secret: "test-secret".into(),
+        auth_enabled: true,
+        log_level: "error".into(),
+        ..Default::default()
+    })
+    .await;
+
+    let (tport, _seen) = start_fake_target().await;
+    let u1 = issue_test_token("test-secret", "u1", "dev1");
+    let _a = start_fake_bridge(
+        &format!("ws://{addr}/ws"),
+        &u1,
+        "nx-test",
+        format!("http://127.0.0.1:{tport}"),
+        "A 上的",
+        "pc-a",
+        "A 机",
+    )
+    .await;
+    let _b = start_fake_bridge(
+        &format!("ws://{addr}/ws"),
+        &u1,
+        "nx-test",
+        format!("http://127.0.0.1:{tport}"),
+        "B 上的",
+        "pc-b",
+        "B 机",
+    )
+    .await;
+
+    // 不带 PC 头 → 409 ambiguous_app（两台都登记了这个名字，让调用方点名）
+    let (status, body, _) = http_get(addr, "/nx-test/api/echo", &[("X-Mn-Ws-Token", &u1)]).await;
+    assert_eq!(status, 409, "多机同名不带点名必须 409");
+    assert_eq!(body["error"], "ambiguous_app");
+    assert_eq!(body["pcs"].as_array().unwrap().len(), 2);
+
+    // 点名 pc-a → 精确路由
+    let (status, body, _) = http_get(
+        addr,
+        "/nx-test/api/echo",
+        &[("X-Mn-Ws-Token", &u1), ("X-Mn-Ws-Pc", "pc-a")],
+    )
+    .await;
+    assert_eq!(status, 200, "点名 pc-a 要能打穿（{body}）");
+
+    // 点名 pc-b → 同样打穿
+    let (status, body, _) = http_get(
+        addr,
+        "/nx-test/api/echo",
+        &[("X-Mn-Ws-Token", &u1), ("X-Mn-Ws-Pc", "pc-b")],
+    )
+    .await;
+    assert_eq!(status, 200, "点名 pc-b 要能打穿（{body}）");
+
+    // 点名不存在的 PC → 404 unknown_pc_app
+    let (status, body, _) = http_get(
+        addr,
+        "/nx-test/api/echo",
+        &[("X-Mn-Ws-Token", &u1), ("X-Mn-Ws-Pc", "pc-nope")],
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"], "unknown_pc_app");
 }
 
 /// 签一枚测试用设备令牌（HS256，与 server 半同一套算法）。

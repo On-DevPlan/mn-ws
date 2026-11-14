@@ -55,10 +55,10 @@ export interface CatalogApp {
   port: number | null;
   base: string | null;
   bridgeId: string;
-  /** 这台 PC 的电脑名。 */
+  /** 本机服务是否在监听（client 探测上报；老 server 不带 → 按 true 算）。 */
+  alive?: boolean;
+  /** 所属 PC 的电脑名（扁平视图里有）。 */
   pcName?: string;
-  /** 这个 app 名当前**路由不到**这台 PC（被别的 PC 顶替了）。 */
-  pcNameMissing?: boolean;
 }
 
 /** 目录里的一个 PC 分组。 */
@@ -68,7 +68,8 @@ export interface CatalogPc {
   name: string;
   userId: string;
   connectedAt: string;
-  apps: (CatalogApp & { active: boolean })[];
+  /** (PC, app) 各自可路由 —— 目录不再有「被顶替」的概念。 */
+  apps: (CatalogApp & { active?: boolean })[];
 }
 
 /** 远端目录视图（/api/bridge/known）。 */

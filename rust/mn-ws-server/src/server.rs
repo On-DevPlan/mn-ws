@@ -12,10 +12,12 @@
 //!   L2 路由层：请求的 app 必须在该桥的注册表里，且属主匹配
 //!   L3 应用层：原始 Authorization / Cookie 原样透传给 nx，nx 自己那套鉴权照常生效
 //!
-//! ## 路由表按 app 索引
+//! ## 路由键 = (PC, app)
 //!
-//! bridges: app → 桥。一个 app 同时只有一个桥（后来者顶替前者）——
-//! 同一台机器跑两份 nx 是异常状态，顶替比随机命中更可预期。
+//! 每台 PC 一条 WS，各自登记各自的应用 —— **(bridgeId, app) 唯一确定一个
+//! 可路由目标**，同名 app 可以同时存在于多台 PC（没有顶替、没有归还）。
+//! 不带 PC 头的请求：只有一台登记了该 app 就直接路由；多台 → 409 ambiguous_app
+//! 让调用方用 `X-Mn-Ws-Pc` 点名。
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -100,12 +102,6 @@ struct PeerMeta {
     connected_at: String,
     ip: Option<String>,
     is_gate: bool,
-    /// 这条连接**注册过的** app 表（不限于它当前持有的）。
-    ///
-    /// 记它是为了「顶替后归还」：同一个 app 被新桥顶替时，旧桥那条记录会从
-    /// bridges 里删掉，但**旧桥仍然连着**。新桥一旦先断开，服务端若只是把 app
-    /// 摘干净，这个 app 就成了「没人能路由」——旧桥明明活着却再也接不到请求。
-    app_list: Vec<AppDescriptor>,
     pc_name: String,
 }
 
@@ -130,9 +126,8 @@ struct Stats {
 
 /// server 半的运行时状态。
 struct State {
-    /// app → 桥（**路由表**：app 名该打到哪条连接上）
-    bridges: Mutex<HashMap<String, Bridge>>,
-    /// bridgeId → PC（**展示表**：每台 PC 一条，互不顶替）。
+    /// bridgeId → PC（**路由表兼展示表**：路由键 = (PC, app)，每台 PC 上
+    /// 登记的应用同时可路由，同名 app 可以同时在多台 PC 上，没有顶替）。
     pcs: Mutex<HashMap<String, PcEntry>>,
     /// 曾经注册过的 app 名 —— 用来区分「从没这个应用」与「这个应用的桥掉线了」
     known_apps: Mutex<Vec<String>>,
@@ -225,7 +220,6 @@ pub async fn run(opts: ServerOptions) -> std::io::Result<SocketAddr> {
     ));
 
     let state = Arc::new(State {
-        bridges: Mutex::new(HashMap::new()),
         pcs: Mutex::new(HashMap::new()),
         known_apps: Mutex::new(Vec::new()),
         pending: Mutex::new(HashMap::new()),
@@ -389,7 +383,7 @@ async fn route(
 
     // ── 公开端点 ───────────────────────────────────────────────────
     if path == "/health" {
-        let bridges = state.bridges.lock().unwrap().len();
+        let pcs = state.pcs.lock().unwrap().len();
         let pending = state.pending.lock().unwrap().len();
         return send_json(
             200,
@@ -397,7 +391,7 @@ async fn route(
                 "ok": true,
                 "service": "mn-ws-server",
                 "uptime": uptime_secs(),
-                "bridges": bridges,
+                "bridges": pcs,
                 "pending": pending,
                 "authEnabled": config.auth_enabled,
             }),
@@ -406,7 +400,16 @@ async fn route(
 
     if path == "/stats" {
         let stats = state.stats.lock().unwrap().clone();
-        let apps: Vec<String> = state.bridges.lock().unwrap().keys().cloned().collect();
+        let apps: Vec<String> = {
+            let pcs = state.pcs.lock().unwrap();
+            let mut names: Vec<String> = pcs
+                .values()
+                .flat_map(|pc| pc.apps.iter().map(|a| a.app.clone()))
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        };
         let pending = state.pending.lock().unwrap().len();
         return send_json(
             200,
@@ -616,7 +619,7 @@ async fn route(
         return send_json(200, build_catalog(&state, &user_id, is_gate));
     }
 
-    // ── 已注册桥的清单（要鉴权）──────────────────────────────────
+    // ── 已注册桥（PC）的清单（要鉴权）────────────────────────────
     if path == "/clients" {
         let caller = identify_caller(&req, &config, &auth);
         let (user_id, is_gate) = match caller {
@@ -625,17 +628,17 @@ async fn route(
                 return send_json(status, json!({ "ok": false, "error": error }))
             }
         };
-        let bridges = state.bridges.lock().unwrap();
+        let pcs = state.pcs.lock().unwrap();
         let mut list: Vec<Value> = Vec::new();
-        for (app, b) in bridges.iter() {
-            if !is_gate && b.user_id != user_id {
+        for pc in pcs.values() {
+            if !is_gate && pc.user_id != user_id {
                 continue;
             }
             list.push(json!({
-                "app": app,
-                "bridgeId": b.bridge_id,
-                "userId": b.user_id,
-                "connectedAt": b.connected_at,
+                "bridgeId": pc.bridge_id,
+                "userId": pc.user_id,
+                "connectedAt": pc.connected_at,
+                "apps": pc.apps.iter().map(|a| a.app.clone()).collect::<Vec<_>>(),
             }));
         }
         let count = list.len();
@@ -677,74 +680,113 @@ async fn bridge_entry(
     };
 
     // ── 选哪台 PC 来服务这个请求 ───────────────────────────────
-    // 默认按路由表（app 名 → 桥，撞名时后来者接管）。
-    // 但**多台 PC 可能有同名 app**（两台机器都跑 nx-kv），这时调用方可以
-    // 用 `X-Mn-Ws-Pc: <bridgeId>` 指定打哪一台。
-    let mut bridge = state.bridges.lock().unwrap().get(&app).cloned();
+    // 路由键 = **(PC, app)**：每台 PC 上登记的应用同时可路由，没有顶替。
+    //   · `X-Mn-Ws-Pc: <bridgeId>` 点名 → 精确到那台（没有该 app → 404 unknown_pc_app）
+    //   · 不点名 → 收集登记了该 app 的 PC：1 台直接路由；
+    //     多台 → 409 ambiguous_app（列出 bridgeId，让调用方点名）；
+    //     0 台 → 按 known_apps 区分 404 unknown_app / 502 bridge_offline
     let pc_hint = protocol::header_value(&req_headers, PC_HEADER).unwrap_or("");
-    if !pc_hint.is_empty() {
+    let candidates: Vec<PcEntry> = {
         let pcs = state.pcs.lock().unwrap();
-        match pcs.get(pc_hint) {
-            Some(pc) if pc.apps.iter().any(|a| a.app == app) => {
-                bridge = Some(Bridge {
-                    peer_id: pc.peer_id,
-                    bridge_id: pc.bridge_id.clone(),
-                    user_id: pc.user_id.clone(),
-                    is_gate: pc.is_gate,
-                    apps: pc.apps.clone(),
-                    connected_at: pc.connected_at.clone(),
-                    ip: pc.ip.clone(),
-                });
+        if !pc_hint.is_empty() {
+            match pcs.get(pc_hint) {
+                // 点名了但不在那台 PC 上 → 明确说，别默默打到另一台去
+                Some(pc) if pc.apps.iter().any(|a| a.app == app) => vec![pc.clone()],
+                _ => {
+                    state.stats.lock().unwrap().rejected += 1;
+                    return send_json(
+                        404,
+                        json!({ "ok": false, "error": "unknown_pc_app", "app": app, "pc": pc_hint }),
+                    );
+                }
             }
-            _ => {
-                // 指定了但不在这台 PC 上 → 明确说，别默默打到另一台去
-                state.stats.lock().unwrap().rejected += 1;
-                return send_json(
-                    404,
-                    json!({ "ok": false, "error": "unknown_pc_app", "app": app, "pc": pc_hint }),
-                );
-            }
+        } else {
+            pcs.values()
+                .filter(|pc| pc.apps.iter().any(|a| a.app == app))
+                .cloned()
+                .collect()
         }
-    }
-
-    let Some(bridge) = bridge else {
-        state.stats.lock().unwrap().offline += 1;
-        // 区分两种「没有」：这个应用从来没注册过（404），
-        // 还是注册过但桥掉线了（502，桥会自动重连）。
-        let known = state.known_apps.lock().unwrap().iter().any(|a| a == &app);
-        store.append(json!({
-            "app": app,
-            "method": method.as_str(),
-            "path": rest_path,
-            "status": if known { 502 } else { 404 },
-            "userId": caller_user,
-        }));
-        return send_json(
-            if known { 502 } else { 404 },
-            json!({
-                "ok": false,
-                "error": if known { "bridge_offline" } else { "unknown_app" },
-                "app": app,
-            }),
-        );
     };
 
-    // ── 属主校验（L2）──────────────────────────────────────────
-    if !is_gate && bridge.user_id != caller_user {
-        state.stats.lock().unwrap().rejected += 1;
-        logger.warn(
-            "rejected: 跨属主访问",
-            Some(&json!({ "app": app, "userId": caller_user, "owner": bridge.user_id })),
-        );
-        store.append(json!({
-            "app": app,
-            "method": method.as_str(),
-            "path": rest_path,
-            "status": 403,
-            "userId": caller_user,
-        }));
-        return send_json(403, json!({ "ok": false, "error": "forbidden", "app": app }));
-    }
+    // 属主过滤（L2 前置）：非门禁调用方只看自己的 PC。自家的在就轮不到别人的，
+    // 这样「两台机器同名 app、其中一台是别人的」不会造成 409 误伤。
+    let candidates: Vec<PcEntry> = if is_gate {
+        candidates
+    } else {
+        let own: Vec<PcEntry> = candidates
+            .iter()
+            .filter(|pc| pc.user_id == caller_user)
+            .cloned()
+            .collect();
+        if own.is_empty() {
+            state.stats.lock().unwrap().rejected += 1;
+            logger.warn(
+                "rejected: 跨属主访问",
+                Some(&json!({ "app": app, "userId": caller_user })),
+            );
+            store.append(json!({
+                "app": app,
+                "method": method.as_str(),
+                "path": rest_path,
+                "status": 403,
+                "userId": caller_user,
+            }));
+            return send_json(403, json!({ "ok": false, "error": "cross_owner" }));
+        }
+        own
+    };
+
+    let bridge = match candidates.len() {
+        1 => {
+            let pc = &candidates[0];
+            Bridge {
+                peer_id: pc.peer_id,
+                bridge_id: pc.bridge_id.clone(),
+                user_id: pc.user_id.clone(),
+                is_gate: pc.is_gate,
+                apps: pc.apps.clone(),
+                connected_at: pc.connected_at.clone(),
+                ip: pc.ip.clone(),
+            }
+        }
+        0 => {
+            state.stats.lock().unwrap().offline += 1;
+            // 区分两种「没有」：这个应用从来没注册过（404），
+            // 还是注册过但桥掉线了（502，桥会自动重连）。
+            let known = state.known_apps.lock().unwrap().iter().any(|a| a == &app);
+            store.append(json!({
+                "app": app,
+                "method": method.as_str(),
+                "path": rest_path,
+                "status": if known { 502 } else { 404 },
+                "userId": caller_user,
+            }));
+            return send_json(
+                if known { 502 } else { 404 },
+                json!({
+                    "ok": false,
+                    "error": if known { "bridge_offline" } else { "unknown_app" },
+                    "app": app,
+                }),
+            );
+        }
+        _ => {
+            // 多台同名且都是调用方的 —— 让调用方点名，别随机命中
+            state.stats.lock().unwrap().rejected += 1;
+            return send_json(
+                409,
+                json!({
+                    "ok": false,
+                    "error": "ambiguous_app",
+                    "app": app,
+                    "pcs": candidates.iter().map(|pc| pc.bridge_id.clone()).collect::<Vec<_>>(),
+                    "hint": format!("用 {} 头指定目标 PC", PC_HEADER),
+                }),
+            );
+        }
+    };
+
+    // （属主校验已在选路时完成：非门禁调用方的候选里只留了自家的 PC）
 
     state.stats.lock().unwrap().requests_in += 1;
 
@@ -887,7 +929,6 @@ async fn bridge_entry(
 /// 构造目录（两份视图：按 PC 分组 + 扁平列表）。
 fn build_catalog(state: &Arc<State>, user_id: &str, is_gate: bool) -> Value {
     let visible = |u: &str| is_gate || u == user_id;
-    let bridges = state.bridges.lock().unwrap();
     let pcs = state.pcs.lock().unwrap();
 
     let mut groups: Vec<Value> = Vec::new();
@@ -907,8 +948,6 @@ fn build_catalog(state: &Arc<State>, user_id: &str, is_gate: bool) -> Value {
                     // 本机服务是否在监听（client 探测上报）—— 目录里标「未启动」用
                     "alive": m.alive,
                     "bridgeId": pc.bridge_id,
-                    // 这个 app 名现在路由到谁那儿 —— 路由表里的主人
-                    "active": bridges.get(&m.app).map(|b| b.bridge_id == pc.bridge_id).unwrap_or(false),
                 })
             })
             .collect();
@@ -938,10 +977,6 @@ fn build_catalog(state: &Arc<State>, user_id: &str, is_gate: bool) -> Value {
                 if let Some(o) = item.as_object_mut() {
                     o.insert("pcName".into(), json!(gname));
                     o.insert("connectedAt".into(), gconnected.clone());
-                    // 路由不到这台 PC 时明确标出来
-                    let active = o.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-                    o.remove("active");
-                    o.insert("pcNameMissing".into(), json!(!active));
                 }
                 list.push(item);
             }
@@ -1087,7 +1122,6 @@ async fn serve_peer<S>(
             connected_at: connected_at.clone(),
             ip: Some(peer_addr.ip().to_string()),
             is_gate: false,
-            app_list: Vec::new(),
             pc_name: String::new(),
         },
     );
@@ -1142,7 +1176,6 @@ async fn serve_peer<S>(
     state.senders.lock().unwrap().remove(&peer_id);
     let meta = state.peers.lock().unwrap().remove(&peer_id);
     if let Some(meta) = meta {
-        restore_replaced_apps(&state, &logger, peer_id, &meta);
         // 该桥上还没回的请求全部失败
         let ids: Vec<String> = {
             let pending = state.pending.lock().unwrap();
@@ -1316,16 +1349,9 @@ fn handle_register(
 
     let connected_at = crate::logger::iso_now();
 
-    // ── 同一台 PC 的旧登记（重连）先摘掉 ─────────────────────
-    let prev_pc = state.pcs.lock().unwrap().get(&bridge_id).cloned();
-    if let Some(prev) = prev_pc {
-        if prev.peer_id != peer_id {
-            let mut bridges = state.bridges.lock().unwrap();
-            bridges.retain(|_, b| b.peer_id != prev.peer_id);
-        }
-    }
-
-    // ── 展示表：每台 PC 一条，互不顶替 ───────────────────────
+    // ── 路由兼展示表：每台 PC 一条，(bridgeId, app) 即可路由目标 ──
+    // 同名 app 在多台 PC 上**并存**（都同时可路由），没有顶替、没有归还 ——
+    // 不带 PC 头的多机同名请求会得到 409 ambiguous_app，让调用方点名。
     state.pcs.lock().unwrap().insert(
         bridge_id.clone(),
         PcEntry {
@@ -1340,40 +1366,6 @@ fn handle_register(
         },
     );
 
-    // ── 路由表：app 名该打到哪条连接 ─────────────────────────
-    // 同 app 被别的 PC 占用 → 路由交给后来者（这是**路由**的选择，
-    // 不影响展示：两台 PC 在目录里都还在，请求可用 X-Mn-Ws-Pc 指定目标）。
-    let mut replaced: Vec<String> = Vec::new();
-    {
-        let mut bridges = state.bridges.lock().unwrap();
-        for m in &clean {
-            let prev = bridges.get(&m.app).cloned();
-            if let Some(prev) = prev {
-                if prev.peer_id != peer_id {
-                    replaced.push(m.app.clone());
-                    bridges.remove(&m.app);
-                    logger.warn(
-                        "同 app 被新桥顶替",
-                        Some(&json!({ "app": m.app, "old": prev.bridge_id, "next": peer_id })),
-                    );
-                }
-            }
-        }
-        for m in &clean {
-            bridges.insert(
-                m.app.clone(),
-                Bridge {
-                    peer_id,
-                    bridge_id: bridge_id.clone(),
-                    user_id: user_id.clone(),
-                    is_gate,
-                    apps: clean.clone(),
-                    connected_at: connected_at.clone(),
-                    ip: state.peers.lock().unwrap().get(&peer_id).and_then(|x| x.ip.clone()),
-                },
-            );
-        }
-    }
     {
         let mut known = state.known_apps.lock().unwrap();
         for m in &clean {
@@ -1389,7 +1381,6 @@ fn handle_register(
         meta.bridge_id = Some(bridge_id.clone());
         meta.user_id = Some(user_id.clone());
         meta.is_gate = is_gate;
-        meta.app_list = clean.clone();
         meta.pc_name = pc_name.clone();
     }
 
@@ -1408,87 +1399,7 @@ fn handle_register(
         "bridgeId": bridge_id,
         "name": pc_name,
         "apps": clean.iter().map(|a| a.app.clone()).collect::<Vec<_>>(),
-        "replaced": replaced,
     }));
-}
-
-/// 把被顶替走的 app 归还给**仍然连着**的旧桥。
-///
-/// 顶替是「一个 app 同时只有一个桥」的取舍，但顶替者一旦先断开，app 就会空档：
-/// 旧桥明明活着却接不到请求，调用方拿到的是 502「注册过但桥掉线了」。
-fn restore_replaced_apps(
-    state: &Arc<State>,
-    logger: &Arc<Logger>,
-    dead_peer_id: usize,
-    dead_meta: &PeerMeta,
-) {
-    for app_meta in &dead_meta.app_list {
-        let app = &app_meta.app;
-        if state.bridges.lock().unwrap().contains_key(app) {
-            continue; // 现在有主了 —— 后来者仍然优先
-        }
-        // 候选：仍连着、且注册过这个 app 的桥。
-        // 优先挑**当前还在展示表里**的那台 PC —— 同一台 PC 重连过的话，
-        // 它的旧连接虽然还开着，但已经不是「这台 PC」了，路由还给它是错的。
-        let pcs = state.pcs.lock().unwrap();
-        let mut candidates: Vec<usize> = state
-            .peers
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(pid, p)| {
-                **pid != dead_peer_id && p.app_list.iter().any(|a| a.app == *app)
-            })
-            .map(|(pid, _)| *pid)
-            .collect();
-        drop(pcs);
-        candidates.sort_by_key(|pid| {
-            if state
-                .pcs
-                .lock()
-                .unwrap()
-                .values()
-                .any(|pc| pc.peer_id == *pid)
-            {
-                0
-            } else {
-                1
-            }
-        });
-        for pid in candidates {
-            let (peer_bridge_id, peer_user_id, peer_is_gate, own) = {
-                let peers = state.peers.lock().unwrap();
-                let Some(p) = peers.get(&pid) else { continue };
-                let own = p.app_list.iter().find(|a| a.app == *app).cloned();
-                match own {
-                    Some(o) => (
-                        p.bridge_id.clone().unwrap_or_default(),
-                        p.user_id.clone().unwrap_or_default(),
-                        p.is_gate,
-                        o,
-                    ),
-                    None => continue,
-                }
-            };
-            state.bridges.lock().unwrap().insert(
-                app.clone(),
-                Bridge {
-                    peer_id: pid,
-                    bridge_id: peer_bridge_id,
-                    user_id: peer_user_id,
-                    is_gate: peer_is_gate,
-                    apps: Vec::new(),
-                    connected_at: dead_meta.connected_at.clone(),
-                    ip: dead_meta.ip.clone(),
-                },
-            );
-            logger.info(
-                "顶替者断开，app 归还给仍在连接的桥",
-                Some(&json!({ "app": app, "peerId": pid })),
-            );
-            break;
-        }
-    }
 }
 
 /// 把请求头转成 JSON 值（给 normalize_headers 用）。

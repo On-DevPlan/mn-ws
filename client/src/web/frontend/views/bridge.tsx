@@ -453,8 +453,8 @@ export default function BridgeView() {
                             <dt>{a.app}</dt>
                             <dd>
                               {a.title} <span className="muted">{a.port ?? '—'}</span>
-                              {/* 撞名被顶替时要说清楚：看得见，但路由不到这一台 */}
-                              {!a.active && <span className="tag warn">路由在别的 PC 上</span>}
+                              {/* (PC, app) 各自可路由，没有顶替；没跑的如实标注 */}
+                              {a.alive === false && <span className="tag warn">未启动</span>}
                             </dd>
                           </div>
                         ))}
