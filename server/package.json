@@ -1,12 +1,12 @@
 {
   "name": "mn-ws-server",
   "version": "0.6.1",
-  "description": "mn-ws server 半：公网侧的 HTTP ⇄ WebSocket 桥，把本机 nx 服务桥给远端 HTTP 客户端",
+  "description": "mn-ws server 半：公网侧的 HTTP ⇄ WebSocket 桥",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "mn-ws-server": "./bin/mn-ws-server.mjs"
+    "mn-ws-server": "./bin/mn-ws-server.exe"
   },
   "exports": {
     ".": {
@@ -28,9 +28,11 @@
     "README.md"
   ],
   "scripts": {
-    "start": "node bin/mn-ws-server.mjs",
+    "start": "node bin/run-local.mjs",
     "dev": "node --import tsx src/cli.ts",
     "build": "tsc -b tsconfig.json",
+    "build:rust": "cargo build --release --manifest-path ../rust/Cargo.toml",
+    "build:dist": "pnpm run build:rust && node ../scripts/install-rust-bin.mjs server",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --import tsx --test test/*.test.ts",
     "lint": "eslint ."

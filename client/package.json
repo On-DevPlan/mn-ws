@@ -6,7 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "mn-ws": "./bin/ws.mjs"
+    "mn-ws": "./bin/mn-ws.exe"
   },
   "exports": {
     ".": {
@@ -20,16 +20,20 @@
     "assets"
   ],
   "scripts": {
-    "start": "pnpm build && node bin/ws.mjs serve",
+    "start": "pnpm build && node scripts/run-local.mjs serve",
     "dev": "node --import tsx scripts/dev.mjs",
     "dev:serve": "node --import tsx src/runtime/cli.ts serve --no-open",
     "link:local": "node scripts/link-local.mjs",
     "unlink:local": "node scripts/link-local.mjs --unlink",
     "build": "tsc -b tsconfig.node.json && vite build",
+    "build:rust": "cargo build --release --manifest-path ../rust/Cargo.toml",
+    "build:dist": "pnpm run build:rust && node ../scripts/install-rust-bin.mjs client",
     "typecheck": "tsc -b tsconfig.node.json tsconfig.web.json",
     "lint": "eslint .",
     "test:smoke": "node tests/smoke.mjs",
     "test:unit": "node --import tsx --test \"tests/unit/*.test.ts\" \"tests/unit/*.test.mjs\"",
+    "test:cross": "node --import tsx tests/cross-compat.mjs && node --import tsx tests/cross-compat-reverse.mjs",
+    "test:panel": "node tests/panel-check.mjs",
     "test:e2e": "node tests/e2e-remote.cjs",
     "test": "pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test:smoke && pnpm run test:unit"
   },

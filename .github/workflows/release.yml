@@ -79,10 +79,35 @@ jobs:
       - name: Build packages
         run: pnpm -r --workspace-concurrency=1 build
 
+      # ── Rust 产物 ───────────────────────────────────────────────────
+      #
+      # npm 包里带的是**原生二进制**（运行时零 Node 依赖）。
+      # 这里编当前平台的产物，装进两个包，并把 `bin` 字段改写成
+      # 当前平台的真实文件名（npm 不做扩展名补全 ——
+      # 指向 `./bin/mn-ws` 而文件是 `./bin/mn-ws.exe` 时，npm 不生成 shim）。
+      #
+      # ⚠️ 发布的包只含**当前平台**的产物 —— 用户装到的是他所在平台的版本。
+      #    多平台的完整矩阵见 `build-rust.yml`。
+      - name: 编译 Rust 产物
+        run: |
+          set -euo pipefail
+          cd rust
+          cargo build --release
+          cd ..
+
+      - name: 装 Rust 产物进 npm 包
+        run: node scripts/install-rust-bin.mjs all
+
       - name: Test
         run: |
           pnpm --filter mn-ws-server test
           pnpm --filter mn-ws test:unit
+          # Rust 侧的测试（协议层 + server 半 + e2e）
+          cd rust && cargo test --release && cd ..
+          # 交叉兼容：TS ↔ Rust 两个方向都要通
+          pnpm --filter mn-ws test:cross
+          # Rust 面板实测：伺服 React 产物 + 全部 API 端点
+          pnpm --filter mn-ws test:panel
 
       # ── 发 server 半（先）────────────────────────────────────────────
       #
