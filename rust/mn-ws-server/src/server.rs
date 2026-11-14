@@ -313,8 +313,54 @@ pub async fn run(opts: ServerOptions) -> std::io::Result<SocketAddr> {
         "mn-ws server 已启动",
         Some(&json!({ "addr": local.to_string(), "wsPath": opts.ws_path })),
     );
+
+    // 预热统一登录的发现文档（后台、幂等、带重试）。
+    //
+    // 为什么必须预热：`/auth/oidc/config` 报的 `idpAvailable` 含义是
+    // 「**成功拉到过**发现文档」，而不是「认证中心在线」。
+    // 不预热的话这个字段永远是 false —— 而部署脚本正是拿它断言
+    // 「统一登录确实生效」，于是一个完全正常的部署会被判成失败。
+    //
+    // 为什么带重试：容器可能比认证中心先起来（编排顺序不保证），
+    // 第一次失败就放弃 = 统一登录一直不可用，直到人工重启。
+    //
+    // 失败不固化缓存（AuthHub 只缓存成功的结果），所以重试是有效的。
+    {
+        let auth = auth.clone();
+        let logger = logger.clone();
+        tokio::spawn(async move {
+            for attempt in 1..=DISCOVERY_WARMUP_MAX_ATTEMPTS {
+                match auth.discover().await {
+                    Ok(_) => {
+                        logger.info(
+                            "统一登录发现文档就绪",
+                            Some(&json!({ "issuer": auth.issuer, "attempt": attempt })),
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        logger.warn(
+                            "发现文档拉取失败，稍后重试",
+                            Some(&json!({ "attempt": attempt, "error": e.message })),
+                        );
+                        if attempt < DISCOVERY_WARMUP_MAX_ATTEMPTS {
+                            tokio::time::sleep(Duration::from_millis(
+                                DISCOVERY_WARMUP_RETRY_MS,
+                            ))
+                            .await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     Ok(local)
 }
+
+/// 发现文档预热的重试参数（次 / 毫秒）。
+const DISCOVERY_WARMUP_MAX_ATTEMPTS: u32 = 10;
+const DISCOVERY_WARMUP_RETRY_MS: u64 = 15_000;
 
 /// HTTP 路由。
 #[allow(clippy::too_many_arguments)]

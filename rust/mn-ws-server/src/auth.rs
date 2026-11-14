@@ -226,7 +226,12 @@ impl AuthHub {
         let doc = self
             .fetch_json(&url, "GET", None, None)
             .await
-            .map_err(|e| AuthError::new("discover_failed", e.message))?;
+            .map_err(|e| {
+                // 记下真实原因 —— `/auth/oidc/config` 的 `idpError` 要反映
+                // 「为什么拉不到」，而不是笼统的「未拉取到发现文档」。
+                *self.discover_error.lock().unwrap() = e.message.clone();
+                AuthError::new("discover_failed", e.message)
+            })?;
         let token_endpoint = doc
             .get("token_endpoint")
             .and_then(|v| v.as_str())
