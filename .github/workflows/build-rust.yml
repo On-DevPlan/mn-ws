@@ -171,7 +171,14 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
+      # client 包要带 React 构建产物（面板的静态资源）。
+      # ⚠️ 必须在「装 Rust 产物」**之前** —— install-rust-bin.mjs 会把
+      #    client/dist/web/public 拷进 client/web/public，产物不在那儿会直接报错。
+      - name: 构建前端产物
+        run: pnpm --filter mn-ws build
+
       - name: 装 Rust 产物进 npm 包并改写 bin 字段
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p rust/target/release
@@ -182,23 +189,17 @@ jobs:
              "rust/target/release/${{ matrix.server }}"
           node scripts/install-rust-bin.mjs all
 
-      # client 包要带 React 构建产物（面板的静态资源）
-      - name: 构建前端产物
-        run: pnpm --filter mn-ws build
-
+      # ── 打成 npm 包（每平台一个）──
+      #
+      # ⚠️ 只打 client —— server 半不再发 npm（它的分发渠道是 Docker 镜像）。
       - name: 打包 client
+        shell: bash
         run: |
           set -euo pipefail
           cd client
           pnpm pack --pack-destination ../dist-pack
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: 打包 server
-        run: |
-          set -euo pipefail
-          cd server
-          pnpm pack --pack-destination ../dist-pack
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
