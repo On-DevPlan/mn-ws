@@ -117,10 +117,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  key: linux-x64 }
-          - { os: windows-latest, key: win32-x64 }
-          - { os: macos-13,       key: darwin-x64 }   # Intel
-          - { os: macos-14,       key: darwin-arm64 } # Apple Silicon
+          - { os: ubuntu-latest,  key: linux-x64,     target: x86_64-unknown-linux-gnu, exe: mn-ws }
+          - { os: windows-latest, key: win32-x64,     target: x86_64-pc-windows-msvc,   exe: mn-ws.exe }
+          # ⚠️ darwin 两个目标都在 macos-latest 上编 —— macos-13 标签已弃用，
+          #    排队排不到 runner（0.7.2 实测：队列挂死、任务被取消）。
+          #    x64 走 --target 交叉编译，与 build-rust.yml 同款已验证做法。
+          - { os: macos-latest,   key: darwin-x64,    target: x86_64-apple-darwin,      exe: mn-ws }
+          - { os: macos-latest,   key: darwin-arm64,  target: aarch64-apple-darwin,     exe: mn-ws }
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -133,8 +136,14 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: 编译 Rust 产物
-        run: cargo build --release
+        shell: bash
         working-directory: rust
+        run: |
+          set -euo pipefail
+          cargo build --release --target ${{ matrix.target }}
+          # make-platform-pkg.mjs 按 target/release 找产物 —— 拷过去
+          mkdir -p target/release
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" target/release/
 
       - name: 生成平台子包
         run: node scripts/make-platform-pkg.mjs
