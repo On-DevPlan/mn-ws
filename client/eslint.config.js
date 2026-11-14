@@ -192,6 +192,8 @@ export default tseslint.config(
       'node_modules/**',
       'coverage/**',
       'src/web/frontend/public/**',
+      // React 构建产物（npm 包里的 web/public）—— 产物不是源码，不该被 lint。
+      'web/**',
       '**/*.cjs',
     ],
   },

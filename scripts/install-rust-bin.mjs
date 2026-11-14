@@ -60,7 +60,13 @@ export function installBinary({ rustBinary, pkgDir, stem }) {
   return { dest, binTarget };
 }
 
-/** 把 React 产物拷进包（client 半需要）。 */
+/** 把 React 产物拷进包（client 半需要）。
+ *
+ * 落在 `web/public` —— 发布布局是「二进制与产物目录并排」：
+ *   node_modules/mn-ws/bin/mn-ws[.exe]
+ *   node_modules/mn-ws/web/public/index.html
+ * Rust 侧的 `web_dir()` 按「可执行文件同级 web/public」找它。
+ */
 export function installWebAssets({ srcDir, destDir }) {
   if (!fs.existsSync(path.join(srcDir, 'index.html'))) {
     throw new Error(
@@ -69,6 +75,7 @@ export function installWebAssets({ srcDir, destDir }) {
     );
   }
   fs.rmSync(destDir, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(destDir), { recursive: true });
   fs.cpSync(srcDir, destDir, { recursive: true });
   return destDir;
 }
@@ -88,5 +95,14 @@ if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1])))
       stem,
     });
     console.log(`[install-rust-bin] ${t} → ${dest}（bin: ${binTarget}）`);
+
+    // client 半还要带上 React 产物（面板的静态资源，由二进制伺服）。
+    if (isClient) {
+      const web = installWebAssets({
+        srcDir: path.join(pkgDir, 'dist', 'web', 'public'),
+        destDir: path.join(pkgDir, 'web', 'public'),
+      });
+      console.log(`[install-rust-bin] client 产物 → ${web}`);
+    }
   }
 }

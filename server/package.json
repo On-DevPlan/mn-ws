@@ -1,6 +1,6 @@
 {
   "name": "mn-ws-server",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "mn-ws server 半：公网侧的 HTTP ⇄ WebSocket 桥",
   "type": "module",
   "main": "./dist/index.js",

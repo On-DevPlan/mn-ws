@@ -85,6 +85,9 @@ console.log(`  临时目录：${tmp}`);
 for (const pkg of ['client', 'server']) {
   const pkgDir = path.join(repoRoot, pkg);
   const name = pkg === 'client' ? 'mn-ws' : 'mn-ws-server';
+  const version = JSON.parse(
+    fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'),
+  ).version;
 
   // ── 打包 ──
   //
@@ -112,6 +115,11 @@ for (const pkg of ['client', 'server']) {
   console.log(`    tarball: ${path.basename(tgz)}（${sizeKb} KB）`);
 
   // ── 安装到隔离目录 ──
+  //
+  // ⚠️ client 包依赖 `mn-ws-server`（同版本）。首版发布时 server 半还没上 npm，
+  //    装 client 会 ETARGET —— 那是**预期的**（release.yml 就是先发 server、
+  //    等它被提升、再发 client）。所以这种情况跳过 client 的安装检查，
+  //    并明确说明，而不是把它当成失败。
   const installDir = path.join(tmp, `install-${name}`);
   fs.mkdirSync(installDir, { recursive: true });
   const inst = spawnSync(
@@ -119,8 +127,20 @@ for (const pkg of ['client', 'server']) {
     ['install', '--no-audit', '--no-fund', '--omit=dev', '--prefix', installDir, tgz],
     { encoding: 'utf8', shell: process.platform === 'win32' },
   );
-  check(`${name} 安装成功`, inst.status === 0, (inst.stderr || '').slice(0, 300));
-  if (inst.status !== 0) continue;
+  if (inst.status !== 0) {
+    const err = (inst.stderr || '').slice(0, 300);
+    const dependsOnServer = /ETARGET/.test(err) && name === 'mn-ws';
+    if (dependsOnServer) {
+      console.log(
+        `    ⓘ ${name} 装不上：依赖的 mn-ws-server@${version} 还没上 npm（首版发布的正常状态）`,
+      );
+      console.log('    ⓘ 等 server 半发布并被提升后重跑本脚本');
+      continue;
+    }
+    check(`${name} 安装成功`, false, err);
+    continue;
+  }
+  check(`${name} 安装成功`, true);
 
   const binDir = path.join(installDir, 'node_modules', '.bin');
   const shim = path.join(binDir, process.platform === 'win32' ? `${name}.cmd` : name);

@@ -246,12 +246,15 @@ fn serve(args: &Args) -> i32 {
         let resolved = config::resolve_apps(&cfg);
 
         if resolved.apps.is_empty() {
-            eprintln!("白名单为空 —— 一个都不桥。");
-            eprintln!("  用 `mn-ws apps add <名字> --port <端口>` 登记一个，");
+            // 白名单为空**不阻止启动** —— 面板正是配置入口：
+            // 用户还没登记任何应用时，面板必须能起来，否则他没法配。
+            //
+            // 桥会连上 server 但不注册任何 app（那是 server 侧的事），
+            // 面板照常可用：登记应用、设白名单、登录，全在面板里做。
+            eprintln!("! 白名单为空 —— 一个都不桥（面板仍可用，在那儿登记应用）");
+            eprintln!("  登记方式: `mn-ws apps add <名字> --port <端口>`");
             eprintln!("  或 `mn-ws serve --apps my-api=http://127.0.0.1:9999`。");
-            return 1;
-        }
-        if !resolved.missing.is_empty() {
+        } else if !resolved.missing.is_empty() {
             eprintln!(
                 "这些应用没有登记基址、已跳过: {}",
                 resolved.missing.join(", ")
