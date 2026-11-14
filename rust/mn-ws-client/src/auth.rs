@@ -320,6 +320,18 @@ pub async fn verify_exchange(
     Ok(v)
 }
 
+/// 客户端发起授权码流程时该用的回调地址：**本机回环 + `/callback`**。
+///
+/// 为什么不沿用 `/auth/oidc/config` 发布的 `redirectUri`：那是 **server 半自己** 的回调
+/// （`http://127.0.0.1:7777/auth/callback`），在认证中心登记在 `mn-ws-server` 名下。
+/// 白名单是按 client 分开的 —— `mn-ws-client` 只许 `http://127.0.0.1:<任意端口>/callback`，
+/// 所以拿服务端那个地址配 `client_id=mn-ws-client` 会被当场判
+/// 「redirect_uri 未在客户端注册白名单内」（400，连登录页都不给）。
+/// 就算放行也没用：端口被钉死在 7777，而 CLI 监听的是内核刚分配的随机端口，code 收不到。
+fn client_redirect_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/callback")
+}
+
 /// 登录统一登录平台。
 ///
 /// 流程（与 TS 版 `client/src/core/session.ts` 同款）：
@@ -366,11 +378,6 @@ pub async fn login(cfg: &serde_json::Map<String, Value>) -> i32 {
     }
 
     let pkce = Pkce::generate();
-    let redirect_uri = if idp.redirect_uri.is_empty() {
-        format!("http://127.0.0.1:0/callback")
-    } else {
-        idp.redirect_uri.clone()
-    };
 
     // 本机一次性监听：收浏览器回调的 code。
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -381,8 +388,8 @@ pub async fn login(cfg: &serde_json::Map<String, Value>) -> i32 {
         }
     };
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-    // 回调地址里的端口必须与实际监听端口一致（白名单是 127.0.0.1:* 通配）。
-    let redirect_uri = redirect_uri.replace(":0/callback", &format!(":{port}/callback"));
+    // 回调必须指向**这个监听器**：端口是内核刚分配的，路径是白名单里那一条 `/callback`。
+    let redirect_uri = client_redirect_uri(port);
 
     let authorize = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&nonce={}&code_challenge={}&code_challenge_method=S256",

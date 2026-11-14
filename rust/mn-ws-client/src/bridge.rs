@@ -113,11 +113,11 @@ pub async fn start_bridge(cfg: &serde_json::Map<String, Value>, resolved: &Resol
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let token = cfg
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    // 凭据：**设备令牌优先**（CLI 或面板登录落盘的账号簿），其次才是静态门禁 token。
+    // 只读 cfg["token"] 的后果很具体：登录过的人手上是设备令牌、顶层 token 是空的，
+    // 注册帧于是带着空串发出去 → 服务端 error: invalid_token → 面板永远「出错」，
+    // 而提示还写着「请重新登录」，把人往死路上带。
+    let token = crate::session::credential(cfg);
     let bridge_id = cfg
         .get("clientId")
         .and_then(|v| v.as_str())
@@ -149,6 +149,21 @@ pub async fn start_bridge(cfg: &serde_json::Map<String, Value>, resolved: &Resol
     handle
 }
 
+/// 从盘上重读一次凭据：变了就换进句柄并返回 true。
+///
+/// 为什么要这样：登录是**在进程之外**发生的（另一个终端 `auth login`，或面板登录页）。
+/// 句柄里的令牌是进程启动时的快照，登录完不重启进程的话，重连永远拿着旧票 ——
+/// 于是「刚登录成功却仍然被拒」，用户只会以为登录没生效。
+fn refresh_token_if_changed(handle: &BridgeHandle) -> bool {
+    let fresh = crate::session::credential(&crate::config::read_config_file());
+    let current = handle.inner.token.lock().unwrap().clone();
+    if fresh.is_empty() || fresh == current {
+        return false;
+    }
+    *handle.inner.token.lock().unwrap() = fresh;
+    true
+}
+
 /// 桥的主循环：连接 → 注册 → 心跳；断了就退避重连。
 async fn run_bridge(handle: BridgeHandle) {
     let mut attempts: u32 = 0;
@@ -166,6 +181,13 @@ async fn run_bridge(handle: BridgeHandle) {
                 // 注册成功后进入收发 + 心跳循环，直到断开。
                 if let Some(code) = serve_connection(&handle, ws).await {
                     if code == 4403 {
+                        // 鉴权被拒：先看是不是**刚换了凭据**，是就用新的重连；
+                        // 不是才停 —— 一直拿旧票重试只会刷屏。
+                        if refresh_token_if_changed(&handle) {
+                            eprintln!("读到新登录的凭据，用设备令牌重连…");
+                            attempts = 0;
+                            continue;
+                        }
                         // 鉴权被拒：**停止重连**并明确告诉用户该做什么。
                         eprintln!("注册被服务端拒绝（设备令牌无效、已过期或已被吊销），已停止重连。");
                         eprintln!("请重新登录: mn-ws auth login");
@@ -176,6 +198,12 @@ async fn run_bridge(handle: BridgeHandle) {
                 }
             }
             ConnectOutcome::AuthRejected => {
+                // 同样是「刚登录」的常见时序：桥先起、人后登录。先换凭据再判死。
+                if refresh_token_if_changed(&handle) {
+                    eprintln!("读到新登录的凭据，用设备令牌重连…");
+                    attempts = 0;
+                    continue;
+                }
                 eprintln!("注册被服务端拒绝（设备令牌无效、已过期或已被吊销），已停止重连。");
                 eprintln!("请重新登录: mn-ws auth login");
                 *handle.inner.state.lock().unwrap() = BridgeState::Error;
@@ -430,11 +458,8 @@ pub async fn fetch_catalog(cfg: &serde_json::Map<String, Value>) -> Result<Value
     if base.is_empty() {
         return Err("缺少服务端地址（serverHttp）".into());
     }
-    let token = cfg
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    // 与起桥同一口径：设备令牌优先，别拿着空的门禁 token 去拉目录（会 401）。
+    let token = crate::session::credential(cfg);
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{base}/api/catalog"))
