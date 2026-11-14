@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "mn-ws-client"
-version = "0.7.2"
+version = "0.7.4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "mn-ws-core"
-version = "0.7.2"
+version = "0.7.4"
 dependencies = [
  "indexmap",
  "rand 0.8.8",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "mn-ws-server"
-version = "0.7.2"
+version = "0.7.4"
 dependencies = [
  "base64 0.22.1",
  "bytes",

@@ -67,7 +67,14 @@ jobs:
         run: |
           set -euo pipefail
           CLIENT_VER=$(node -p "require('./client/package.json').version")
-          echo "mn-ws $CLIENT_VER"
+          CARGO_VER=$(node -e "const s=require('fs').readFileSync('rust/Cargo.toml','utf8');const m=s.match(/\[workspace\.package\][\s\S]*?\nversion\s*=\s*\"([^\"]+)\"/);if(!m){console.error('rust/Cargo.toml 里找不到 [workspace.package] version');process.exit(1)}process.stdout.write(m[1])")
+          echo "mn-ws $CLIENT_VER / rust workspace $CARGO_VER"
+          # 二进制用 env!("CARGO_PKG_VERSION") 自报版本。两个版本不一致时，
+          # 用户装到 0.7.4 而 --version 说 0.7.2，会据此判断「修复没生效」。
+          if [ "$CARGO_VER" != "$CLIENT_VER" ]; then
+            echo "::error::rust/Cargo.toml 版本 ($CARGO_VER) 与 npm 版本 ($CLIENT_VER) 不一致 —— 跑 scripts/sync-optional-deps.mjs 对齐后再提交"
+            exit 1
+          fi
           if [ "${{ github.ref_type }}" = "tag" ]; then
             TAG="${GITHUB_REF_NAME}"
             if [ "$TAG" != "v$CLIENT_VER" ]; then
@@ -78,14 +85,14 @@ jobs:
             echo "手动触发：使用 v$CLIENT_VER"
           fi
 
-      # 防呆：主包与 4 个平台子包必须同版本。跑了 sync 脚本后 git 必须是干净的
-      # —— 有 diff 说明有人改了主包版本忘了同步子包。
-      - name: 校验平台子包版本对齐
+      # 防呆：主包、4 个平台子包、Rust workspace 必须同版本。跑了 sync 脚本后
+      # git 必须是干净的 —— 有 diff 说明有人改了主包版本忘了同步别处。
+      - name: 校验平台子包与 Rust 版本对齐
         run: |
           set -euo pipefail
           node scripts/sync-optional-deps.mjs
-          git diff --exit-code client/platform \
-            || { echo "::error::平台子包版本未与主包对齐 —— 本地跑 scripts/sync-optional-deps.mjs 后再提交"; exit 1; }
+          git diff --exit-code client/platform rust/Cargo.toml rust/Cargo.lock \
+            || { echo "::error::子包或 Rust 版本未与主包对齐 —— 本地跑 scripts/sync-optional-deps.mjs 后再提交"; exit 1; }
 
       - name: Build packages
         run: pnpm -r --workspace-concurrency=1 build
