@@ -16,6 +16,7 @@
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -43,7 +44,8 @@ const WEB_DIR = path.join(repoRoot, 'client', 'dist', 'web', 'public');
 
 /** 起 Rust client 面板（独立配置目录，别动用户的真配置）。 */
 function startPanel(port) {
-  const home = fs.mkdtempSync(path.join(process.env.TEMP, 'mn-ws-panel-'));
+  // os.tmpdir() 跨平台：Windows 的 TEMP 与 Linux 的 TMPDIR 都认
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'mn-ws-panel-'));
   fs.writeFileSync(
     path.join(home, 'config.json'),
     JSON.stringify({

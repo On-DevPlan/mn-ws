@@ -149,9 +149,8 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          gh release create "$TAG" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "$TAG" \
-            --generate-notes \
-            || gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --generate-notes
+          # 先查再建：build-rust.yml 在同一 tag 上也会建 release，重复建会撞。
+          # （gh release edit 不认 --generate-notes —— 别用 edit 兜底）
+          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --generate-notes
           echo "release $TAG 已发布"

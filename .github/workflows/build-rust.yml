@@ -234,11 +234,18 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          FILES=$(find artifacts -name '*.tgz' -o -name 'mn-ws*' -type f | tr '\n' ' ')
-          gh release create "$TAG" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "$TAG" \
-            --generate-notes \
-            $FILES \
-            || gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --generate-notes $FILES
-          echo "release $TAG 已挂上产物"
+          # ⚠️ find 的 -o 要加括号分组，且必须配 -type f —— 否则目录也会被当产物
+          FILES=$(find artifacts -type f \( -name '*.tgz' -o -name 'mn-ws*' \) | tr '\n' ' ')
+          echo "产物：$FILES"
+          # 先查再建：两个 tag 工作流（本流水线与 release.yml）都会碰 release，重复建会撞
+          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --generate-notes
+          # 上传与建 release 分开做 —— 刚建的 release 偶尔还没就绪，重试几次
+          for i in 1 2 3; do
+            if gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" --clobber $FILES; then
+              echo "release $TAG 已挂上产物"
+              exit 0
+            fi
+            echo "上传失败，重试 $i/3"; sleep 5
+          done
+          exit 1
