@@ -94,17 +94,25 @@ cargo build --release                   # 两个二进制（各约 6MB）
 |---|---|
 | `mn-ws` | **起桥 + 起面板**（默认端口 7777，`--port N` 改端口） |
 | `mn-ws status` | 桥接状态：连没连、注册了哪些 app、当前凭据是谁 |
-| `mn-ws apps` | 列出可桥接的应用（白名单 + 本地端口存活探测） |
+| `mn-ws apps` / `apps list` | 列出可桥接的应用（白名单 + 本地端口存活探测） |
 | `mn-ws apps set --apps a,b=http://127.0.0.1:7800` | 设置白名单（不给就一个都不桥） |
 | `mn-ws apps add <名字> --port N [--title T]` | **动态登记**一个本机服务 |
 | `mn-ws apps remove <名字>` | 移除一个动态登记的应用 |
+| `mn-ws apps reopen <名字>` | 一键重新暴露一个**用过**的应用 |
 | `mn-ws apps known` | 列出**已登记**的应用（名字 / 基址 / 标题） |
 | `mn-ws catalog` | 拉远端 server 半的元信息目录 |
 | `mn-ws bridge start` / `bridge stop` | 启停桥 |
 | `mn-ws auth login` | 统一登录（弹浏览器）：换回设备令牌，之后免手填 |
 | `mn-ws auth list` / `switch` / `status` / `logout` | 本机多账号账号簿 |
-| `mn-ws doctor` | 环境自检：端口 / 鉴权 / 应用可达性 / server 连通性 |
-| `mn-ws help` | 完整命令表（每个面板按钮都有对应命令） |
+| `mn-ws bootstrap show` | 一次取齐面板启动所需的全部上下文 |
+| `mn-ws routes` | 列出 CLI 命令与 HTTP 路由的对照表 |
+| `mn-ws health` | 自检：存储目录是否可写 |
+| `mn-ws setting get` / `setting set` | 本机设置（导航分组 / 隐藏 / 主题） |
+| `mn-ws greet <名字>` | 打个招呼（演示动作：问候次数累计进本机存储） |
+| `mn-ws version` / `--version` | 版本号 |
+| `mn-ws help [命令]` | 完整命令表（每个面板按钮都有对应命令） |
+
+> 每个命令都支持 `--json`（机器可读），人读模式是默认。
 
 ### `mn-ws-server`（server 半，公网机）
 

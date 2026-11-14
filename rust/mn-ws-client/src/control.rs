@@ -289,16 +289,19 @@ async fn api(
 
         // ── bridge ──
         ("GET", "/api/bridge/status") => Ok(bridge_status(&cfg, &resolved, &handle)),
-        ("GET", "/api/bridge/apps") => Ok(bridge_apps(&resolved)),
+        ("GET", "/api/bridge/apps") => Ok(bridge_apps(&cfg, &resolved).await),
         ("POST", "/api/bridge/whitelist") => set_whitelist(&cfg, &params),
         ("POST", "/api/bridge/apps/add") => add_custom_app(&cfg, &params),
         ("POST", "/api/bridge/apps/remove") => remove_custom_app(&cfg, &params),
         ("POST", "/api/bridge/apps/reopen") => reopen_favorite(&cfg, &params),
-        ("GET", "/api/bridge/catalog") => Ok(json!({
-            "ok": false,
-            "error": "拉目录需要 server 地址；请用 `mn-ws catalog`（命令行）",
-            "apps": [],
-        })),
+        ("GET", "/api/bridge/catalog") => match crate::bridge::fetch_catalog(&cfg).await {
+            Ok(json) => Ok(json),
+            Err(e) => Ok(json!({
+                "ok": false,
+                "error": e,
+                "apps": [],
+            })),
+        },
         ("POST", "/api/bridge/start") => Ok(json!({
             "ok": true,
             "state": handle.state().label(),
@@ -340,10 +343,10 @@ async fn api(
 }
 
 /// API 层的错误（带错误码与 HTTP 状态）。
-struct ApiError {
-    status: StatusCode,
-    code: &'static str,
-    message: String,
+pub struct ApiError {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub message: String,
 }
 
 impl ApiError {
@@ -364,7 +367,10 @@ impl ApiError {
 }
 
 /// 面板启动上下文。
-fn bootstrap(cfg: &Map<String, Value>, resolved: &config::ResolvedApps) -> Value {
+///
+/// 形态与 TS 版 `modules/home/index.ts` 的 `bootstrap()` 对齐：
+/// `app` / `storePath` / `storeEnv` / `commands`。
+pub fn bootstrap(cfg: &Map<String, Value>, resolved: &config::ResolvedApps) -> Value {
     json!({
         "app": {
             "name": "mn-ws",
@@ -375,6 +381,7 @@ fn bootstrap(cfg: &Map<String, Value>, resolved: &config::ResolvedApps) -> Value
         "views": crate::views::views(),
         "commands": command_table(),
         "storePath": store::store_path().to_string_lossy(),
+        "storeEnv": "MN_WS_STORE",
         "apps": resolved.apps.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
     })
 }
@@ -383,7 +390,7 @@ fn bootstrap(cfg: &Map<String, Value>, resolved: &config::ResolvedApps) -> Value
 ///
 /// 面板的类型化客户端靠它解析路由（`typed-client.ts`）—— 所以每个
 /// action 都要在这里出现，缺一个面板就有一个按钮点不动。
-fn command_table() -> Vec<Value> {
+pub fn command_table() -> Vec<Value> {
     vec![
         cmd("home.bootstrap", "home", &["bootstrap", "show"], Some(("GET", "/api/bootstrap")), "一次取齐面板启动所需的全部上下文"),
         cmd("home.routes", "home", &["routes"], Some(("GET", "/api/routes")), "列出 CLI 命令与 HTTP 路由的对照表"),
@@ -429,32 +436,32 @@ fn cmd(
 }
 
 /// 路由表（`/api/routes` 的内容）。
-fn routes() -> Value {
+pub fn routes() -> Value {
     json!({ "routes": command_table() })
 }
 
 /// 自检：存储目录是否可写。
-fn health() -> Value {
+///
+/// 形态与 TS 版一致：{ status: 'ok' | 'blocked', storePath, reason }
+pub fn health() -> Value {
     let p = store::store_path();
-    let writable = if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir).is_ok()
-            && std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&p)
-                .is_ok()
-    } else {
-        false
+    let mut reason = String::new();
+    let ok = match store::save_store(&store::load_store()) {
+        Ok(_) => true,
+        Err(e) => {
+            reason = e.to_string();
+            false
+        }
     };
     json!({
-        "ok": true,
+        "status": if ok { "ok" } else { "blocked" },
         "storePath": p.to_string_lossy(),
-        "writable": writable,
+        "reason": reason,
     })
 }
 
 /// 演示动作：问候次数累计进本机存储。
-fn greet(params: &Map<String, Value>) -> Result<Value, ApiError> {
+pub fn greet(params: &Map<String, Value>) -> Result<Value, ApiError> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -486,7 +493,7 @@ fn greet(params: &Map<String, Value>) -> Result<Value, ApiError> {
 }
 
 /// 读取全部设置。
-fn get_settings() -> Value {
+pub fn get_settings() -> Value {
     json!({
         "settings": Value::Object(store::settings()),
         "views": crate::views::views(),
@@ -500,7 +507,7 @@ fn get_settings() -> Value {
 }
 
 /// 修改设置（PATCH 语义：只改传入的项）。
-fn set_settings(params: &Map<String, Value>) -> Result<Value, ApiError> {
+pub fn set_settings(params: &Map<String, Value>) -> Result<Value, ApiError> {
     // 两种形状：`{key, value}` 或 `{set: {...}}`
     let mut patch: Map<String, Value> = Map::new();
     if let Some(Value::Object(set)) = params.get("set") {
@@ -671,7 +678,7 @@ fn view_ids() -> Vec<String> {
 }
 
 /// 账号簿视图。
-fn accounts_view(cfg: &Map<String, Value>) -> Value {
+pub fn accounts_view(cfg: &Map<String, Value>) -> Value {
     let accounts = config::with_accounts(cfg);
     let active = cfg.get("activeAccount").and_then(|v| v.as_str()).unwrap_or("");
     let list: Vec<Value> = accounts
@@ -691,7 +698,7 @@ fn accounts_view(cfg: &Map<String, Value>) -> Value {
 }
 
 /// 当前身份。
-fn auth_status(cfg: &Map<String, Value>) -> Value {
+pub fn auth_status(cfg: &Map<String, Value>) -> Value {
     let sess = session::adopt_from_account_store(cfg);
     let accounts = config::with_accounts(cfg);
     let active = cfg.get("activeAccount").and_then(|v| v.as_str()).unwrap_or("");
@@ -719,7 +726,7 @@ fn auth_status(cfg: &Map<String, Value>) -> Value {
 }
 
 /// 切换当前生效账号。
-fn auth_switch(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
+pub fn auth_switch(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
     let target = params
         .get("account")
         .and_then(|v| v.as_str())
@@ -749,7 +756,7 @@ fn auth_switch(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<
 }
 
 /// 清除登录凭据。
-fn auth_logout(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
+pub fn auth_logout(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
     let all = params
         .get("all")
         .map(|v| v == &json!(true) || v.as_str() == Some("true"))
@@ -801,35 +808,86 @@ fn bridge_status(
 }
 
 /// 可桥接应用清单。
-fn bridge_apps(resolved: &config::ResolvedApps) -> Value {
-    let configured: Vec<Value> = resolved
-        .apps
-        .iter()
-        .map(|(name, base)| {
-            json!({
-                "app": name,
-                "title": resolved
-                    .titles
-                    .iter()
-                    .find(|(t, _)| t == name)
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or_else(|| name.clone()),
-                "port": port_of(base),
-                "base": base,
-                "alive": true,
-                "custom": false,
-            })
-        })
-        .collect();
+///
+/// 与 TS 版 `modules/bridge/service.ts` 的 `bridgeApps` 同款：
+///   · `configured` —— 白名单里的应用 + **端口存活探测**
+///   · `candidates` —— 已登记但不在白名单里的（面板据此勾选）
+///   · `missing`    —— 在白名单里但没有登记基址的
+///   · `favorites`  —— 用过的应用（一键重开）
+///
+/// 存活探测用 **TCP connect**（不是 HTTP 请求）：桥接关心的是
+/// 「这个服务在不在」，不是「它返回什么」。连不上就是不在，多问一句没意义。
+pub async fn bridge_apps(cfg: &Map<String, Value>, resolved: &config::ResolvedApps) -> Value {
+    let mut configured: Vec<Value> = Vec::new();
+    for (name, base) in &resolved.apps {
+        let title = resolved
+            .titles
+            .iter()
+            .find(|(t, _)| t == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| name.clone());
+        let alive = probe_alive(base).await;
+        let custom = config::registered_apps(cfg)
+            .iter()
+            .any(|a| a.name == *name);
+        configured.push(json!({
+            "app": name,
+            "title": title,
+            "port": port_of(base),
+            "base": base,
+            "alive": alive,
+            "custom": custom,
+        }));
+    }
+
+    // 候选项：已登记（appMap / customApps）但没进白名单的。
+    let registered = config::registered_apps(cfg);
+    let mut candidates: Vec<Value> = Vec::new();
+    for a in &registered {
+        if resolved.apps.iter().any(|(n, _)| n == &a.name) {
+            continue;
+        }
+        let alive = probe_alive(&a.base).await;
+        candidates.push(json!({
+            "app": a.name,
+            "title": a.title.clone().unwrap_or_else(|| a.name.clone()),
+            "port": port_of(&a.base),
+            "alive": alive,
+        }));
+    }
+
     json!({
         "configured": configured,
-        "candidates": [],
+        "candidates": candidates,
         "missing": resolved.missing,
         "favorites": favorites::read_favorites()
             .iter()
             .map(|f| f.to_json())
             .collect::<Vec<_>>(),
     })
+}
+
+/// 探测基址上的端口是否在监听（TCP connect，超时 400ms）。
+async fn probe_alive(base: &str) -> bool {
+    let Some(port) = mn_ws_core::apps::port_of_base(base) else {
+        return false;
+    };
+    let host = url::Url::parse(base)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    {
+        Ok(Ok(s)) => {
+            drop(s);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// 从基址取端口。
@@ -841,7 +899,7 @@ fn port_of(base: &str) -> Value {
 }
 
 /// 设置白名单。
-fn set_whitelist(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
+pub fn set_whitelist(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
     let apps: Vec<String> = params
         .get("apps")
         .and_then(|v| v.as_str())
@@ -887,7 +945,7 @@ fn set_whitelist(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Resul
 }
 
 /// 动态登记一个应用。
-fn add_custom_app(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
+pub fn add_custom_app(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -907,7 +965,13 @@ fn add_custom_app(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Resu
         .trim()
         .to_string();
     if base.is_empty() {
-        if let Some(p) = params.get("port").and_then(|v| v.as_u64()) {
+        // 端口可能是数字，也可能是**字符串**（CLI 的 `--port 9911` 就是字符串）——
+        // 两种都要认。
+        if let Some(p) = params.get("port").and_then(|v| match v {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.trim().parse::<u64>().ok(),
+            _ => None,
+        }) {
             base = format!("http://127.0.0.1:{p}");
         }
     }
@@ -952,7 +1016,7 @@ fn add_custom_app(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Resu
 }
 
 /// 移除一个自定义应用。
-fn remove_custom_app(
+pub fn remove_custom_app(
     cfg: &Map<String, Value>,
     params: &Map<String, Value>,
 ) -> Result<Value, ApiError> {
@@ -979,7 +1043,7 @@ fn remove_custom_app(
 }
 
 /// 一键重新暴露一个用过的应用。
-fn reopen_favorite(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
+pub fn reopen_favorite(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())

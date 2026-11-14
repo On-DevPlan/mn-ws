@@ -138,11 +138,43 @@ Rust 版的面板登录（`POST /api/auth/login/start` → 浏览器 → `/callb
 去 server 半换设备令牌。TS 版也是这样（userinfo 是 server 半换码时的步骤）。
 少一次往返，也少一处「认证中心的凭据要传多远」。
 
-### 5.2 skill 模块没进 Rust
+### 5.2 skill 模块已从项目里移除
 
-`core/skills/*`（748 行，管 `~/.claude/skills` 的安装）仍是 TS。
-它与桥接无关，是「平台能力」，留在 TS 侧不影响零 Node 依赖的承诺
-（面板是构建期产物）。
+原来有个「随包 skill 的安装」功能（`core/skills/*`，748 行，管 `~/.claude/skills`
+的安装），**已整体删除** —— TS 侧 6 个源文件 + assets 目录 + 3 个 smoke 测试，
+Rust 侧不实现。
+
+删掉的理由有两条：
+
+1. **它的 hook 机制与「运行时零 Node 依赖」直接冲突**。
+   它的 `module` handler 是 ESM 模块（`import()` 一个 `.mjs`）——
+   要跑它就必须有 Node。
+2. **它与桥接无关**：那是「平台能力」，不是「桥的能力」。
+
+删的时候要连带处理干净，否则两边会分裂：
+- `runtime/registry.ts` 的模块注册表（去掉 skill 模块）
+- `CLI_ONLY_PREFIXES` 的 `skill` 豁免前缀（registry.ts 与 eslint.config.js **两处**，
+  有单测对账）
+- `eslint.config.js` 的模块路径枚举
+- `client/package.json` 的 `files`（assets 不再存在）
+
+### 5.3 CLI 与面板共用一份实现
+
+Rust 侧新增 `commands.rs`：每个动作**只有一份实现**，CLI 与面板是两个入口
+（`mn-ws greet 世界` 与 `POST /api/greet` 做的是同一件事）。
+
+这是「Web 上每个操作都有等价 CLI 命令」的结构性保证 ——
+实现只有一份，不可能两边分叉。
+
+Rust CLI 补齐了 TS 版的全部命令面：
+`bootstrap show` / `routes` / `health` / `greet` / `setting get|set` /
+`version`，加上原有的 `serve` / `bridge start|stop` / `status` /
+`apps list|add|remove|set|known|reopen` / `catalog` / `auth login|list|switch|status|logout`。
+
+每个命令都支持 `--json`（机器可读）与人读模式两种输出，形态与 TS 版逐字对齐。
+
+smoke 测试也改测**原生二进制**（不是 TS 源码）——
+npm 包里分发的就是它，测 TS 源码等于测了个不存在的东西。
 
 ### 5.3 `port` 的探测是同步的
 
@@ -161,6 +193,7 @@ mn-ws status
 mn-ws apps list|add|remove|set|known
 mn-ws catalog
 mn-ws auth login|list|switch|logout
+mn-ws bootstrap show / routes / health / greet / setting get|set / version
 
 # server 半
 mn-ws-server [--host h] [--port n] [--token TOKEN] [--jwt-secret s]
@@ -172,3 +205,19 @@ mn-ws-server doctor
 
 server 半的 `~/.mn-ws/server.json`、环境变量前缀 `MN_WS_`、三道安全闸
 （无鉴权不许起 / 无鉴权不许绑 0.0.0.0 / 端口被占明确报错不顺延）也**逐条对齐**。
+
+---
+
+## 7. TS 版还留着什么，为什么
+
+**发布物是 Rust 版**（npm 包里是原生二进制，镜像是 Rust 二进制）。
+
+但 TS 源码**没有删** —— 它有两个当下的用途：
+
+1. **交叉兼容测试的参照物**。
+   `client/tests/cross-compat-reverse.mjs` 要起一个**真的 TS server 半**，
+   验证「旧版 client 能连新版 server」。TS 版在切流期间就是旧版。
+2. **对照与回滚**。
+
+切流稳定、且确认没有旧版本 client 在跑之后，TS server 半才可以退役。
+那之前它是**活的对照组**，不是死代码。

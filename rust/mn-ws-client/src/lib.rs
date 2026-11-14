@@ -13,6 +13,7 @@ pub mod apps;
 pub mod auth;
 pub mod bridge;
 pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod control;
 pub mod data_plane;
