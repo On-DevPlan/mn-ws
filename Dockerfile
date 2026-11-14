@@ -35,6 +35,11 @@ COPY rust/mn-ws-server/Cargo.toml ./rust/mn-ws-server/
 #   mn-ws-client → lib + bin（集成测试要访问 lib）
 #   mn-ws-server → lib + bin
 # 少一个就会报「couldn't read xxx/src/lib.rs」（之前就踩过）。
+#
+# ⚠️⚠️ 编完占位后必须**清掉 target/**：否则下一步编真源码时，cargo 会认为
+#    「依赖没变、指纹没变」而**直接复用占位产物** ——
+#    那样打进镜像的就是 `fn main() {}`，容器起来什么都不干就 exit 0。
+#    （症状：容器反复 Restarting(0)、健康检查永远不过、日志全空。）
 RUN mkdir -p rust/mn-ws-core/src rust/mn-ws-client/src rust/mn-ws-server/src \
  && echo "" > rust/mn-ws-core/src/lib.rs \
  && echo "" > rust/mn-ws-client/src/lib.rs \
@@ -43,13 +48,14 @@ RUN mkdir -p rust/mn-ws-core/src rust/mn-ws-client/src rust/mn-ws-server/src \
  && echo "fn main() {}" > rust/mn-ws-server/src/main.rs \
  && cd rust \
  && cargo build --release --bin mn-ws-server \
- && rm -rf mn-ws-core/src mn-ws-client/src mn-ws-server/src
+ && rm -rf mn-ws-core/src mn-ws-client/src mn-ws-server/src target
 
 # 真源码进来重编。
 COPY rust/ ./rust/
 RUN cd rust \
  && cargo build --release --bin mn-ws-server \
- && cp target/release/mn-ws-server /tmp/mn-ws-server
+ && cp target/release/mn-ws-server /tmp/mn-ws-server \
+ && ./target/release/mn-ws-server --version
 
 # ─────────────────────── 运行阶段 ───────────────────────
 FROM debian:bookworm-slim
