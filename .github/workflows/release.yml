@@ -81,9 +81,11 @@ jobs:
       # ── Rust 产物 ───────────────────────────────────────────────────
       #
       # npm 包里带的是**原生二进制**（运行时零 Node 依赖）。
-      # 这里编当前平台的产物，装进两个包，并把 `bin` 字段改写成
+      # 这里编当前平台的产物，装进 client 包，并把 `bin` 字段改写成
       # 当前平台的真实文件名（npm 不做扩展名补全 ——
       # 指向 `./bin/mn-ws` 而文件是 `./bin/mn-ws.exe` 时，npm 不生成 shim）。
+      #
+      # ⚠️ 只装 client —— server 半不再发 npm（它的分发渠道是 Docker 镜像）。
       #
       # ⚠️ 发布的包只含**当前平台**的产物 —— 用户装到的是他所在平台的版本。
       #    多平台的完整矩阵见 `build-rust.yml`。
@@ -95,7 +97,11 @@ jobs:
           cd ..
 
       - name: 装 Rust 产物进 npm 包
-        run: node scripts/install-rust-bin.mjs all
+        run: node scripts/install-rust-bin.mjs client
+
+      - name: 验证发布布局
+        # 二进制能不能按发布布局找到 React 产物 —— 装完才发现就晚了。
+        run: pnpm --filter mn-ws test:layout
 
       - name: Test
         run: |
