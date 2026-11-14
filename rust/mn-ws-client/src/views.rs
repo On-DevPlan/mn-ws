@@ -16,7 +16,6 @@ pub fn views() -> Vec<Value> {
         json!({"id": "home", "title": "首页", "order": 1}),
         json!({"id": "bridge", "title": "桥接", "order": 2}),
         json!({"id": "auth", "title": "登录", "order": 3}),
-        json!({"id": "skill", "title": "技能", "order": 4}),
     ]
 }
 

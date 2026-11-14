@@ -86,7 +86,7 @@ const ACTION_PARITY = {
       create(context) {
         const opts = context.options[0] || {};
         // 豁免名单同时也是 runtime/registry 的常量；两处必须一致（有单测对账）
-        const prefixes = opts.cliOnlyPrefixes || ['serve', 'server', 'skill'];
+        const prefixes = opts.cliOnlyPrefixes || ['serve', 'server'];
 
         // 读对象里的字面量属性（只认 Identifier / Literal 键，不碰计算属性）
         //
@@ -250,7 +250,7 @@ export default tseslint.config(
     files: ['src/modules/*/index.ts'],
     plugins: { local: LOCAL_RULES },
     rules: {
-      'local/action-parity': ['error', { cliOnlyPrefixes: ['serve', 'server', 'skill'] }],
+      'local/action-parity': ['error', { cliOnlyPrefixes: ['serve', 'server'] }],
     },
   },
 
@@ -285,7 +285,6 @@ export default tseslint.config(
       'src/modules/home/**/*.{ts,tsx}',
       'src/modules/bridge/**/*.{ts,tsx}',
       'src/modules/auth/**/*.{ts,tsx}',
-      'src/modules/skill/**/*.{ts,tsx}',
     ],
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
@@ -298,7 +297,6 @@ export default tseslint.config(
                 '../home/*', '../home/**',
                 '../bridge/*', '../bridge/**',
                 '../auth/*', '../auth/**',
-                '../skill/*', '../skill/**',
               ],
               allowTypeImports: true,
               message:

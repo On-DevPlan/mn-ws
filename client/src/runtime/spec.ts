@@ -12,7 +12,7 @@ const TYPES = new Set(['string', 'number', 'boolean', 'array', 'json', 'kv']);
 
 // 取 action 的 CLI 路径列表。支持两种写法：
 //   单路径   cli: ['repo', 'list']
-//   多路径   cli: [['bundled','list'], ['skill','install','--list']]   ← 别名
+//   多路径   cli: [['apps','list'], ['apps','show']]   ← 别名
 export function cliPathsOf(action: { cli: ActionShape['cli'] }): string[][] {
   const cli = action.cli;
   if (!cli || !cli.length) return [];
@@ -44,7 +44,7 @@ export function flagSpecsOf(action: { flags?: Record<string, FlagSpec> }): Resol
 }
 
 // 该 action 里哪些 flag 是布尔型——CLI 解析据此决定要不要吃掉下一个 token 当值。
-// 少了这份信息，`skill install --force demo` 会把 force 解析成字符串 'demo'。
+// 少了这份信息，`apps add --force demo` 会把 force 解析成字符串 'demo'。
 export function booleanFlagNames(action: { flags?: Record<string, FlagSpec> }): Set<string> {
   return new Set(
     flagSpecsOf(action)

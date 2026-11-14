@@ -143,8 +143,8 @@ interface CommandHit {
 // 匹配命令：把声明路径与 argv 前缀逐 token 比较，选最长匹配。
 //
 // 逐 token 比较（而非只取「开头连续的非 flag token」）是必需的——有些命令路径
-// 本身就含 flag，例如 `skill install --list` 是「列出内置包」而非「安装」。
-// 最长优先则让 ['skill','central','add'] 压过 ['skill','central']，子命令与别名因此共存。
+// 本身就含 flag，例如 `apps set --list` 是「列出白名单」而非「设置」。
+// 最长优先则让 ['apps','set','add'] 压过 ['apps','set']，子命令与别名因此共存。
 export function resolveCommand(argv: string[]): CommandHit | null {
   let best: { cmd: AnyCommand; path: string[] } | null = null;
   let bestLen = -1;
@@ -165,7 +165,7 @@ interface ParsedRest {
   flags: Record<string, unknown>;
 }
 
-// 解析剩余 token。布尔 flag 不吞下一个 token —— 否则 `skill install --force demo`
+// 解析剩余 token。布尔 flag 不吞下一个 token —— 否则 `apps add --force demo`
 // 会把 force 解析成字符串 'demo'，而 demo 本该是位置参数。
 function parseRest(rest: string[], cmd: AnyCommand): ParsedRest {
   const bools = booleanFlagNames(cmd);

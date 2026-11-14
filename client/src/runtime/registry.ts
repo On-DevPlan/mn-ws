@@ -14,11 +14,10 @@ import { cliPathsOf } from './spec.js';
 import home from '../modules/home/index.js';
 import bridge from '../modules/bridge/index.js';
 import auth from '../modules/auth/index.js';
-import skill from '../modules/skill/index.js';
 
 // 编译期：defineModules 对模块/action id、CLI/HTTP 键查重 + 路由歧义检测；
 // 运行时：按 order 排序。
-export const MODULES = defineModules([home, bridge, auth, skill]);
+export const MODULES = defineModules([home, bridge, auth]);
 
 export interface BoundAction {
   id: string;
@@ -41,14 +40,14 @@ export const ACTIONS: BoundAction[] = MODULES.flatMap((m) =>
 // 方向性约定（刻意的不对称）：
 //   - 每条 action 都必须有 cli —— 保证「Web 上能做的，CLI 都能做」
 //   - 有 http 才谈得上 Web 入口；http: null 只留给两类：
-//       a) 豁免前缀（serve / server / skill —— 天然是 CLI 侧能力）
+//       a) 豁免前缀（serve / server —— 天然是 CLI 侧能力）
 //       b) 显式 web: false（这个操作就是不给面板入口）
 //     其余 http: null 一律视为漏声明，启动即失败（与 eslint 的 local/action-parity 同规）
 //   - 不允许声明 http 却没有 cli，也不允许 http 与 web: false 同时出现
 //
 // 豁免前缀必须与 eslint.config.js 里 local/action-parity 的 cliOnlyPrefixes 一致，
 // tests/unit/registry.test.mjs 会对账。
-export const CLI_ONLY_PREFIXES = ['serve', 'server', 'skill'];
+export const CLI_ONLY_PREFIXES = ['serve', 'server'];
 
 const seenIds = new Set<string>();
 const seenCli = new Set<string>();

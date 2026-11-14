@@ -16,8 +16,7 @@
   },
   "files": [
     "dist",
-    "bin",
-    "assets"
+    "bin"
   ],
   "scripts": {
     "start": "pnpm build && node scripts/run-local.mjs serve",
