@@ -312,6 +312,8 @@ async fn api(
             r
         }
         ("POST", "/api/bridge/apps/reopen") => reopen_favorite(&cfg, &params),
+        ("POST", "/api/bridge/favorites/remove") => remove_favorite_api(&params),
+        ("POST", "/api/bridge/favorites/update") => update_favorite_api(&params),
         ("GET", "/api/bridge/catalog") => match crate::bridge::fetch_catalog(&cfg).await {
             Ok(json) => Ok(json),
             Err(e) => Ok(json!({
@@ -427,6 +429,8 @@ pub fn command_table() -> Vec<Value> {
         cmd("bridge.apps.add", "bridge", &["apps", "add"], Some(("POST", "/api/bridge/apps/add")), "动态登记一个应用"),
         cmd("bridge.apps.remove", "bridge", &["apps", "remove"], Some(("POST", "/api/bridge/apps/remove")), "移除一个自定义应用"),
         cmd("bridge.apps.reopen", "bridge", &["apps", "reopen"], Some(("POST", "/api/bridge/apps/reopen")), "重新暴露一个用过的应用"),
+        cmd("bridge.favorites.remove", "bridge", &["favorites", "remove"], Some(("POST", "/api/bridge/favorites/remove")), "删掉一条常用"),
+        cmd("bridge.favorites.update", "bridge", &["favorites", "update"], Some(("POST", "/api/bridge/favorites/update")), "编辑一条常用的基址或显示名"),
         cmd("bridge.catalog", "bridge", &["catalog"], Some(("GET", "/api/bridge/catalog")), "拉远端目录"),
         cmd("bridge.start", "bridge", &["bridge", "start"], Some(("POST", "/api/bridge/start")), "起桥"),
         cmd("bridge.stop", "bridge", &["bridge", "stop"], Some(("POST", "/api/bridge/stop")), "停桥"),
@@ -1099,6 +1103,37 @@ pub fn reopen_favorite(cfg: &Map<String, Value>, params: &Map<String, Value>) ->
         params.insert("title".into(), json!(t));
     }
     add_custom_app(cfg, &params)
+}
+
+/// 删一条常用（按路由标识定位）。
+pub fn remove_favorite_api(params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_input("缺少路由标识：name"));
+    }
+    let removed = favorites::remove_favorite(&name);
+    Ok(json!({ "name": name, "removed": removed }))
+}
+
+/// 编辑一条常用：换基址 / 换显示名。路由标识不可改 —— reopen 靠它重开。
+pub fn update_favorite_api(params: &Map<String, Value>) -> Result<Value, ApiError> {
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let base = params.get("base").and_then(|v| v.as_str());
+    let title = params.get("title").and_then(|v| v.as_str());
+    match favorites::update_favorite(&name, base, title) {
+        Ok(f) => Ok(f.to_json()),
+        Err(e) => Err(ApiError::bad_input(e)),
+    }
 }
 
 /// 取请求的 query（转成字符串字典）。

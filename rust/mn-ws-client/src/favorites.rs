@@ -94,6 +94,19 @@ pub fn read_favorites() -> Vec<FavoriteApp> {
     by_name
 }
 
+/// 写回常用列表（排序 + 截断 + 落盘）。
+fn write_favorites(list: Vec<FavoriteApp>) {
+    let mut list = list;
+    list.sort_by(|a, b| b.used_at.cmp(&a.used_at));
+    list.truncate(FAVORITES_LIMIT);
+    let mut raw = config::read_config_file();
+    raw.insert(
+        "favorites".into(),
+        Value::Array(list.iter().map(|f| f.to_json()).collect()),
+    );
+    let _ = config::write_config_file(&raw);
+}
+
 /// 记一次「用过这个应用」。
 ///
 /// 同名覆盖：同一个路由标识换了端口，就该更新而不是多出一条 ——
@@ -117,14 +130,59 @@ pub fn remember_favorite(name: &str, base: &str, title: Option<&str>) {
             used_at: crate::auth::now_ms(),
         },
     );
-    rest.truncate(FAVORITES_LIMIT);
+    write_favorites(rest);
+}
 
-    let mut raw = config::read_config_file();
-    raw.insert(
-        "favorites".into(),
-        Value::Array(rest.iter().map(|f| f.to_json()).collect()),
-    );
-    let _ = config::write_config_file(&raw);
+/// 删掉一条常用（按路由标识）。返回是否真的删了。
+///
+/// 为什么要有它：常用是「用过就记」，测试时的 3231、kkkk 也会留在这里 ——
+/// 没有删除的话，这条列表只会被 20 条上限慢慢挤出，用户看着一直膈应。
+pub fn remove_favorite(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let before = read_favorites();
+    let rest: Vec<FavoriteApp> = before.iter().filter(|f| f.name != name).cloned().collect();
+    if rest.len() == before.len() {
+        return false;
+    }
+    write_favorites(rest);
+    true
+}
+
+/// 编辑一条常用：换基址 / 换显示名（**路由标识不可改** —— reopen 靠它重开）。
+///
+/// 编辑不动 usedAt：改名不是「用过」，不该把条目顶到列表最前面。
+/// 传 None 表示这一项保持原样；base 传空串报错（没有基址的常用没有意义）。
+pub fn update_favorite(
+    name: &str,
+    base: Option<&str>,
+    title: Option<&str>,
+) -> Result<FavoriteApp, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("缺少路由标识：name".into());
+    }
+    if let Some(b) = base.map(str::trim) {
+        if b.is_empty() {
+            return Err(format!("{name}：基址不能为空"));
+        }
+    }
+    let mut list = read_favorites();
+    let Some(f) = list.iter_mut().find(|f| f.name == name) else {
+        return Err(format!("常用里没有 {name}"));
+    };
+    if let Some(b) = base.map(str::trim) {
+        f.base = b.to_string();
+    }
+    if let Some(t) = title {
+        let t = t.trim();
+        f.title = if t.is_empty() { None } else { Some(t.to_string()) };
+    }
+    let updated = f.clone();
+    write_favorites(list);
+    Ok(updated)
 }
 
 #[cfg(test)]
@@ -143,5 +201,41 @@ mod tests {
         assert_eq!(j["name"], "my-api");
         assert_eq!(j["title"], "我的服务");
         assert_eq!(j["usedAt"], 123);
+    }
+
+    #[test]
+    fn remove_and_update_favorites() {
+        // 隔离：测试落盘走临时目录（MN_WS_HOME），绝不碰真实配置
+        let tmp = std::env::temp_dir().join(format!("mn-ws-fav-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev_home = std::env::var("MN_WS_HOME").ok();
+        std::env::set_var("MN_WS_HOME", &tmp);
+
+        remember_favorite("fav-a", "http://127.0.0.1:1111", None);
+        remember_favorite("fav-b", "http://127.0.0.1:2222", None);
+
+        // 编辑：换基址 + 清显示名
+        let updated = update_favorite("fav-a", Some("http://127.0.0.1:1112"), Some("")).unwrap();
+        assert_eq!(updated.base, "http://127.0.0.1:1112");
+        assert_eq!(updated.title, None);
+        let list = read_favorites();
+        assert_eq!(list.iter().find(|f| f.name == "fav-a").unwrap().base, "http://127.0.0.1:1112");
+
+        // 编辑不存在的条目报错；空基址报错
+        assert!(update_favorite("nope", Some("http://x"), None).is_err());
+        assert!(update_favorite("fav-a", Some("  "), None).is_err());
+
+        // 删除：删得到 / 再删一次报 false
+        assert!(remove_favorite("fav-b"));
+        assert!(!read_favorites().iter().any(|f| f.name == "fav-b"));
+        assert!(!remove_favorite("fav-b"));
+
+        // 还原环境 + 清理临时目录
+        match prev_home {
+            Some(v) => std::env::set_var("MN_WS_HOME", v),
+            None => std::env::remove_var("MN_WS_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

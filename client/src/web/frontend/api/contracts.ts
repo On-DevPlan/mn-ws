@@ -35,6 +35,8 @@ export type TypedClient = Record<
   'auth.list': ActionFn;
   'auth.switch': ActionFn;
   'auth.logout': ActionFn;
+  'bridge.favorites.remove': ActionFn;
+  'bridge.favorites.update': ActionFn;
 };
 
 type ActionFn = (params?: Record<string, unknown>) => Promise<any>;
