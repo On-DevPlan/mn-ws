@@ -8,3 +8,19 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 *.tgz
+
+# ── Rust 产物 ──────────────────────────────────────────────
+# 编译产物不入库 —— CI 与本地各自构建。
+rust/target/
+target/
+
+# workspace 只有**根目录**一份 Cargo.lock —— 子 crate 里那份是 cargo 顺手生成的，
+# 提交它会让依赖解析出现两个真相来源。
+rust/*/Cargo.lock
+
+# npm 包里带的原生二进制同理：**构建产物**，不是源码。
+# CI 在每个平台各自 build + pack（见 .github/workflows/build-rust.yml）。
+client/bin/mn-ws
+client/bin/mn-ws.exe
+server/bin/mn-ws-server
+server/bin/mn-ws-server.exe

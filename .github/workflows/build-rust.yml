@@ -1,0 +1,235 @@
+# Rust 多平台编译 —— 产出可随 npm 分发的原生二进制。
+#
+# 与 mn-rt 的 `build-input-agent.yml` 同款骨架，但多编两个二进制
+# （client 半 `mn-ws` + server 半 `mn-ws-server`），且**每个平台各自 pack 一个 npm 包**。
+#
+# ## 为什么每个平台发一个包
+#
+# npm 的 `bin` 字段指向**一个确切的文件名**（npm 不做扩展名补全 ——
+# 实测：指向 `./bin/mn-ws` 而文件是 `./bin/mn-ws.exe` 时，npm 找不到目标、
+# 不生成 shim，还会把那个路径从包里移走）。
+# Windows 要 `.exe`、Unix 不要 —— 同一份 tarball 满足不了。
+#
+# 所以：CI 在每个平台各自 build + 各自 pack，那个平台上的包就自洽。
+# 用户 `npm i -g mn-ws` 装到的是**他所在平台**的产物。
+#
+# ## 触发
+#
+#   · push 到 main 且改了 rust/ 或本文件 → 编译校验（不发布）
+#   · 打 tag v* → 编译 + 上传产物到 Release
+#   · 手动触发 → 只编译，留 artifact
+#
+# 发布到 npm 由 `release.yml` 负责（它还要处理版本号与 npm 的分阶段提升）。
+
+name: build-rust
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'rust/**'
+      - 'scripts/install-rust-bin.mjs'
+      - 'scripts/platform-bin.mjs'
+      - '.github/workflows/build-rust.yml'
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - 'scripts/install-rust-bin.mjs'
+      - 'scripts/platform-bin.mjs'
+      - '.github/workflows/build-rust.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Windows x64 ----
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: win32-x64
+            client: mn-ws.exe
+            server: mn-ws-server.exe
+
+          # ---- macOS x64（Intel）----
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: darwin-x64
+            client: mn-ws
+            server: mn-ws-server
+
+          # ---- macOS arm64（Apple Silicon）----
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: darwin-arm64
+            client: mn-ws
+            server: mn-ws-server
+
+          # ---- Linux x64 ----
+          # ubuntu-22.04 → glibc 2.35。如需更低 glibc 兼容性，
+          # 可改为在 ubuntu-22.04 上使用 cross 或容器构建。
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: linux-x64
+            client: mn-ws
+            server: mn-ws-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('rust/Cargo.lock', 'rust/Cargo.toml') }}
+
+      - name: 编译 Rust 产物
+        working-directory: rust
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: 单测
+        working-directory: rust
+        run: cargo test --release --target ${{ matrix.target }}
+
+      # ── 冒烟：二进制真的能跑，且不依赖 Node ──
+      #
+      # 这一步不能省：编译通过 ≠ 产物可用。
+      # 尤其是「运行时零 Node 依赖」这个承诺 —— 冒烟里显式把 node 从 PATH 移除，
+      # 证明它确实不经过 node。
+      - name: 冒烟测试（不依赖 Node）
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="rust/target/${{ matrix.target }}/release"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="$BIN/mn-ws.exe"
+            SRV="$BIN/mn-ws-server.exe"
+          else
+            BIN="$BIN/mn-ws"
+            SRV="$BIN/mn-ws-server"
+          fi
+          chmod +x "$BIN" "$SRV" 2>/dev/null || true
+
+          # 找一个含 node 的目录，从 PATH 里挖掉
+          NODE_DIR=""
+          if command -v node >/dev/null 2>&1; then
+            NODE_DIR="$(dirname "$(command -v node)")"
+          fi
+          if [ -n "$NODE_DIR" ]; then
+            PATH="$(echo "$PATH" | tr ':' '\n' | grep -vx "$NODE_DIR" | paste -sd: -)"
+            export PATH
+          fi
+
+          echo "--- mn-ws --version（PATH 里没有 node）---"
+          "$BIN" --version
+          echo "--- mn-ws-server --version（PATH 里没有 node）---"
+          "$SRV" --version
+
+          # 反证：node 真的不在 PATH 里了
+          if command -v node >/dev/null 2>&1; then
+            echo "::error::node 仍在 PATH 里 —— 冒烟没有证明「零 Node 依赖」"
+            exit 1
+          fi
+
+      # ── 打成 npm 包（每平台一个）──
+      - name: 准备 Node 与 pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 装 Rust 产物进 npm 包并改写 bin 字段
+        run: |
+          set -euo pipefail
+          mkdir -p rust/target/release
+          # 把 target-specific 的产物放到 target/release（脚本按这个路径找）
+          cp "rust/target/${{ matrix.target }}/release/${{ matrix.client }}" \
+             "rust/target/release/${{ matrix.client }}"
+          cp "rust/target/${{ matrix.target }}/release/${{ matrix.server }}" \
+             "rust/target/release/${{ matrix.server }}"
+          node scripts/install-rust-bin.mjs all
+
+      # client 包要带 React 构建产物（面板的静态资源）
+      - name: 构建前端产物
+        run: pnpm --filter mn-ws build
+
+      - name: 打包 client
+        run: |
+          set -euo pipefail
+          cd client
+          pnpm pack --pack-destination ../dist-pack
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 打包 server
+        run: |
+          set -euo pipefail
+          cd server
+          pnpm pack --pack-destination ../dist-pack
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: mn-ws-${{ matrix.artifact }}
+          path: |
+            dist-pack/*.tgz
+            rust/target/${{ matrix.target }}/release/mn-ws*
+          if-no-files-found: error
+
+  # ── 打 tag 时把产物挂到 GitHub Release ──
+  release:
+    name: 上传 Release 产物
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 挂到 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          FILES=$(find artifacts -name '*.tgz' -o -name 'mn-ws*' -type f | tr '\n' ' ')
+          gh release create "$TAG" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "$TAG" \
+            --generate-notes \
+            $FILES \
+            || gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --generate-notes $FILES
+          echo "release $TAG 已挂上产物"

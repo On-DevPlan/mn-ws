@@ -1,0 +1,46 @@
+# mn-ws 的 Rust workspace。
+#
+# 三个 crate：
+#   mn-ws-core    —— 协议层（帧格式 + app 路由规则）。server 半与 client 半**共用**。
+#   mn-ws-client  —— client 半：本机桥 + 面板静态资源服务 + CLI。
+#   mn-ws-server  —— server 半：公网 HTTP ⇄ WebSocket 桥。
+#
+# ## 为什么协议层要单独一个 crate
+#
+# 协议是**两端共同遵守**的东西。以前 server 半是 TS、client 半也是 TS，
+# 协议只有一份（server/src/protocol.ts），client 半通过 workspace 依赖引它 ——
+# 那时是好的。
+#
+# 两半都转 Rust 之后，如果各写各的，协议就有**两份实现**：
+# 「帧能解、字段对不上」的漂移是静默的（症状是「桥接上了但请求莫名其妙失败」），
+# 而契约测试只能**发现**漂移，不能**杜绝**它。
+#
+# 共用一个 crate 之后，漂移在结构上就不可能发生 —— 改协议必须改一处，
+# 两端同时生效。这是「两半同语言」带来的额外收益。
+[workspace]
+resolver = "2"
+members = ["mn-ws-core", "mn-ws-client", "mn-ws-server"]
+
+[workspace.package]
+version = "0.6.1"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process", "signal", "net"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "charset", "http2", "json"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
+http-body-util = "0.1"
+bytes = "1"
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
+webbrowser = "1"

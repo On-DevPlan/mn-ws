@@ -11,6 +11,12 @@ tests
 Dockerfile
 .dockerignore
 
-# ⚠️ **不要排除 server/dist** —— 镜像里装的就是它（宿主机构建好的产物）。
-#    只排除 client/dist（面板产物，镜像里用不到）。
+# ⚠️ **不要排除 rust/** —— Dockerfile 里的多阶段构建要它（Rust 二进制在里面编）。
+#
+# 但要排除编译产物：那是宿主机上的（可能是别的 target 架构的），
+# 镜像里要重新编。
+rust/target
+rust/**/target
+
+# client/dist（面板产物，镜像里用不到 —— 它跑在用户机器上，不在公网机上）
 client/dist

@@ -1,0 +1,49 @@
+[package]
+name = "mn-ws-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mn-ws client 半：把本机的 HTTP 服务桥给远端 HTTP 客户端（Rust 实现，运行时零 Node 依赖）"
+publish = false
+
+[[bin]]
+name = "mn-ws"
+path = "src/main.rs"
+
+[dependencies]
+# 共享协议层：帧格式 + app 路由规则。server 半也依赖它 —— 两半只有一份协议实现。
+mn-ws-core = { path = "../mn-ws-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# WS 客户端：注册 / 心跳 / 指数退避重连
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+# WS 的 send/next 来自 futures 的 Stream/Sink 扩展 trait。
+# tokio-tungstenite 不再导出 Stream trait（它的 stream 模块只有 NoDelay），
+# 所以这里显式依赖 futures-util —— 它本来就在依赖树里，不是新增供应链。
+futures-util = { workspace = true }
+# HTTP 客户端（把 WS 帧还原成本机 HTTP 请求）+ HTTP 服务端（面板 + /api/*）
+reqwest = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+# 认证：PKCE / HMAC-SHA256（手写，不引 JWT 库 —— 只需要 HS256 验签与签发）
+hmac = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+# URL 处理（回调地址拼装、query 解析）
+url = { workspace = true }
+# 打开浏览器（面板首次启动）
+webbrowser = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+
+[profile.release]
+opt-level = "z"   # 体积优先：桥是长驻低频服务
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

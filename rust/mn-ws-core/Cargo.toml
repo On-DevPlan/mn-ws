@@ -1,0 +1,17 @@
+[package]
+name = "mn-ws-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "mn-ws 的协议层：通道帧格式 + app 路由规则（server 半与 client 半共用）"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+tokio = { workspace = true }
+# 协议头的**顺序**要进到帧的 JSON 里（帧字节要与 TS 版逐字对齐），
+# 所以用 IndexMap 而不是 HashMap —— 后者的随机序会让每次序列化都不同。
+indexmap = { version = "2", features = ["serde"] }
+rand = { workspace = true }
