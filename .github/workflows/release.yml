@@ -129,6 +129,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 与 build-rust 同一套：**显式**装目标三元组。
+      # darwin-x64 是在 arm64 的 macos-latest 上**交叉**编译，不装 x86_64-apple-darwin
+      # 就会 `can't find crate for 'core'`（0.7.2 那次 darwin-x64 就是这么 17 秒挂掉的）。
+      # 装宿主自己的 target 是空操作，所以四个平台共用这一步。
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
       # setup-node 只为 ~/.npmrc 的发布认证（编译本身用不到 Node）
       - uses: actions/setup-node@v4
         with:
