@@ -3,19 +3,11 @@
   "version": "0.7.0",
   "description": "HTTP 与 WebSocket 双向桥的客户端半：把本机 nx 服务桥给远端 HTTP 客户端",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "//main": "**没有 main / exports** —— 这个包是个 CLI 工具，不是库。发布物是「原生二进制 + React 构建产物」，没有 JS 入口可导入。（0.6.x 时代有 dist/index.js，那是 Node 时代的 client 半，现在由 Rust 二进制取代。）",
   "bin": {
     "mn-ws": "./bin/mn-ws.exe"
   },
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
   "files": [
-    "dist",
     "bin",
     "web"
   ],
@@ -38,12 +30,8 @@
     "test:e2e": "node tests/e2e-remote.cjs",
     "test": "pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test:smoke && pnpm run test:unit"
   },
-  "dependencies": {
-    "mn-ws-server": "workspace:*",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "ws": "^8.18.0"
-  },
+  "//dependencies": "运行时**零依赖**：包里的东西是原生二进制 + React 构建产物，不需要 npm 装任何运行时依赖。",
+  "//devDependencies": "react/react-dom/ws 只在构建期用（vite 打进产物里）。mn-ws-server 是**交叉兼容测试的对照物**（TS 版的 server 半，验证旧版 client 能连新版 server）—— 它不再发布到 npm，所以放 devDependencies（本地 workspace 链接）。",
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
@@ -51,10 +39,14 @@
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.3.0",
     "eslint": "^10.0.0",
+    "mn-ws-server": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "tsx": "^4.19.0",
     "typescript": "~5.9.0",
     "typescript-eslint": "^8.71.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "ws": "^8.18.0"
   },
   "engines": {
     "node": ">=18"

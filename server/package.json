@@ -3,6 +3,9 @@
   "version": "0.7.0",
   "description": "mn-ws server 半：公网侧的 HTTP ⇄ WebSocket 桥",
   "type": "module",
+  "private": true,
+  "//private": "**这个包不发布到 npm。** server 半是公网机上的服务，它的分发渠道是 **Docker 镜像**（见仓库根的 Dockerfile）—— 一个 npm 包对它没有意义。npm 上的 `mn-ws-server` 停在 0.6.x，0.7.0 起不再更新。",
+  "//main": "main/exports 保留：workspace 内的 TS client（client/src/core/bridge.ts）要引 `mn-ws-server/protocol` 与 `mn-ws-server/apps` —— 那份 TS client 半是**交叉兼容测试的对照物**（验证旧版 client 能连新版 server），不是发布物。",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
@@ -28,7 +31,7 @@
     "README.md"
   ],
   "scripts": {
-    "start": "node bin/run-local.mjs",
+    "start": "node scripts/run-local.mjs",
     "dev": "node --import tsx src/cli.ts",
     "build": "tsc -b tsconfig.json",
     "build:rust": "cargo build --release --manifest-path ../rust/Cargo.toml",

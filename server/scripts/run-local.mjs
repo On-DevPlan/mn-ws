@@ -3,13 +3,15 @@
 //
 // ## 为什么要有这个
 //
-// npm 包里的 `bin` 指向原生二进制（运行时零 Node 依赖）。但**开发时**，
-// 二进制可能还没构建（Rust 改动没编译）——这时直接跑二进制会报「文件不存在」。
+// server 半的发布物是 **Docker 镜像**（见仓库根的 Dockerfile），
+// npm 包不发（`private: true`）。但本地开发与自测时 Rust 产物可能还没构建，
+// 所以这里回退到 TS 实现 —— 那是**交叉兼容测试的对照物**（验证旧版 client
+// 能连新版 server）。
 //
-// 所以本地开发走这个脚本：它先看二进制在不在，在就跑它，不在就回退到 TS。
-// CI 与发布永远走原生二进制（那条路是硬的）。
+// **它只在开发期用** —— 所以放在 `scripts/` 而不是 `bin/`：
+// `bin/` 会被打进 npm 包，而这个脚本对安装方没有意义。
 //
-// 用法：node bin/run-local.mjs [子命令...]
+// 与 client/scripts/run-local.mjs 同款。理由见那边。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -19,14 +21,14 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, '..');
 
 const isWin = process.platform === 'win32';
-const binary = path.join(here, isWin ? 'mn-ws-server.exe' : 'mn-ws-server');
+const binary = path.join(pkgRoot, 'bin', isWin ? 'mn-ws-server.exe' : 'mn-ws-server');
 
 if (fs.existsSync(binary)) {
   const r = spawnSync(binary, process.argv.slice(2), { stdio: 'inherit' });
   process.exit(r.status ?? 0);
 }
 
-// 回退到 TS 实现（开发时 Rust 产物还没构建的场景）
+// 回退到 TS 实现
 const { runServerCli } = await import(
   pathToFileURL(path.join(pkgRoot, 'dist', 'cli.js')).href
 );

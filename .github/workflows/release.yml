@@ -56,24 +56,23 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # 附注 tag 与版本号必须一致 —— 见文件头说明
-      - name: 校验 tag 与两个包的版本一致
+      #
+      # ⚠️ 0.7.0 起只校验 **client 包**：server 半不再发布到 npm
+      #    （它的分发渠道是 Docker 镜像），所以两个包不必同号了。
+      - name: 校验 tag 与版本一致
         run: |
           set -euo pipefail
-          SERVER_VER=$(node -p "require('./server/package.json').version")
           CLIENT_VER=$(node -p "require('./client/package.json').version")
-          echo "mn-ws-server $SERVER_VER · mn-ws $CLIENT_VER"
-          if [ "$SERVER_VER" != "$CLIENT_VER" ]; then
-            echo "::error::两个包的版本不一致（server $SERVER_VER / client $CLIENT_VER）—— 一起发版就该同号"
-            exit 1
-          fi
+          SERVER_VER=$(node -p "require('./server/package.json').version")
+          echo "mn-ws $CLIENT_VER · mn-ws-server（不发 npm）$SERVER_VER"
           if [ "${{ github.ref_type }}" = "tag" ]; then
             TAG="${GITHUB_REF_NAME}"
-            if [ "$TAG" != "v$SERVER_VER" ]; then
-              echo "::error::tag ($TAG) 与版本 (v$SERVER_VER) 不一致 —— 不发布，避免 npm 上出现跳号版本"
+            if [ "$TAG" != "v$CLIENT_VER" ]; then
+              echo "::error::tag ($TAG) 与版本 (v$CLIENT_VER) 不一致 —— 不发布，避免 npm 上出现跳号版本"
               exit 1
             fi
           else
-            echo "手动触发：使用 v$SERVER_VER"
+            echo "手动触发：使用 v$CLIENT_VER"
           fi
 
       - name: Build packages
@@ -109,52 +108,20 @@ jobs:
           # Rust 面板实测：伺服 React 产物 + 全部 API 端点
           pnpm --filter mn-ws test:panel
 
-      # ── 发 server 半（先）────────────────────────────────────────────
+      # ── 发 client 半 ─────────────────────────────────────────────────
       #
-      # ⚠️ 为什么是 `pnpm pack` + `npm publish <tarball>` 而不是 `npm publish`：
-      #   client 包的依赖里有 `workspace:*`（workspace 协议）。**npm publish 不认识
-      #   这个协议** —— 原样发出去的话，安装方直接报
-      #   `Unsupported URL Type "workspace:"`，包等于废掉。
-      #   pnpm pack 会把它重写成具体版本（workspace:* → 0.2.0），
+      # ⚠️ 0.7.0 起**只发 client 半**：
+      #   · server 半不再发 npm —— 它的分发渠道是 **Docker 镜像**
+      #     （公网机上的服务，一个 npm 包对它没有意义）。
+      #   · client 半不再依赖 mn-ws-server —— 运行时零依赖，装完就能用。
+      #
+      # 所以这里没有「先发 server、等它被 npm 提升、再发 client」那套编排了。
+      # （0.6.x 需要那套，是因为 client 依赖 mn-ws-server@同版本。）
+      #
+      # 为什么是 `pnpm pack` + `npm publish <tarball>` 而不是 `npm publish`：
+      #   pnpm pack 会把 `workspace:*` 重写成具体版本（npm publish 不认识
+      #   这个协议 —— 原样发出去的话安装方直接报 `Unsupported URL Type "workspace:"`），
       #   而 npm publish <tarball> 保留 provenance 签名（pnpm publish 没有这个 flag）。
-      - name: 发布 mn-ws-server
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          cd server
-          VER=$(node -p "require('./package.json').version")
-          if npm view "mn-ws-server@$VER" version >/dev/null 2>&1; then
-            echo "mn-ws-server@$VER 已在 npm 上，跳过"
-            exit 0
-          fi
-          pnpm pack --pack-destination .pack
-          npm publish ".pack/mn-ws-server-$VER.tgz" --provenance --access public
-
-      # ── 等 server 半真的可解析，再发 client 半 ──────────────────────
-      #
-      # ⚠️ npm 是**分阶段发布**的：publish 只是把版本提交上去，
-      #    真正可安装还要等平台提升（实测 1-3 分钟，有时更久）。
-      #    client 半的依赖是 mn-ws-server@<同版本> —— server 半没被提升之前，
-      #    装 mn-ws 直接报 "No matching version found for mn-ws-server@x.y.z"。
-      #    所以必须**等它可解析**，而不是「publish 完就接着发下一个」。
-      - name: 等 mn-ws-server 可解析
-        run: |
-          set -euo pipefail
-          cd server
-          VER=$(node -p "require('./package.json').version")
-          for i in $(seq 1 90); do
-            if npm view "mn-ws-server@$VER" version >/dev/null 2>&1; then
-              echo "mn-ws-server@$VER 已可解析（第 $i 次探测）"
-              exit 0
-            fi
-            echo "  等待 mn-ws-server@$VER 被提升…（第 $i 次，每次 20s）"
-            sleep 20
-          done
-          echo "::error::mn-ws-server@$VER 30 分钟内没被提升 —— 停在这里，别发 client（装了也装不上）"
-          exit 1
-
-      # ── 再发 client 半（依赖刚被提升的 server 半）──────────────────────
       - name: 发布 mn-ws
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

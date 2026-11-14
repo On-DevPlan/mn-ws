@@ -29,9 +29,17 @@ COPY rust/mn-ws-client/Cargo.toml ./rust/mn-ws-client/
 COPY rust/mn-ws-server/Cargo.toml ./rust/mn-ws-server/
 
 # 用假的源文件占位，让 cargo 先把依赖编出来（这一层只关心依赖）。
+#
+# ⚠️ 占位必须覆盖每个 crate 声明的**全部目标**：
+#   mn-ws-core   → lib
+#   mn-ws-client → lib + bin（集成测试要访问 lib）
+#   mn-ws-server → lib + bin
+# 少一个就会报「couldn't read xxx/src/lib.rs」（之前就踩过）。
 RUN mkdir -p rust/mn-ws-core/src rust/mn-ws-client/src rust/mn-ws-server/src \
  && echo "" > rust/mn-ws-core/src/lib.rs \
+ && echo "" > rust/mn-ws-client/src/lib.rs \
  && echo "fn main() {}" > rust/mn-ws-client/src/main.rs \
+ && echo "" > rust/mn-ws-server/src/lib.rs \
  && echo "fn main() {}" > rust/mn-ws-server/src/main.rs \
  && cd rust \
  && cargo build --release --bin mn-ws-server \
