@@ -7,6 +7,7 @@
 //!   mn-ws bridge start|stop
 //!   mn-ws status
 //!   mn-ws apps list|add|remove|set|known
+//!   mn-ws favorites list|remove|update
 //!   mn-ws catalog
 //!   mn-ws auth login|list|switch|logout
 //!   mn-ws help [命令]
@@ -21,7 +22,9 @@ use crate::bridge;
 use crate::commands;
 use crate::config;
 use crate::control;
+use crate::favorites;
 use crate::session;
+use serde_json::json;
 
 /// CLI 的解析结果。
 pub struct Args {
@@ -187,7 +190,83 @@ fn dispatch(args: &Args, cmd: &[&str]) -> Option<i32> {
             let rest: Vec<&str> = if one { vec![] } else { rest.to_vec() };
             Some(auth_cmd(&rest, args))
         }
+        ["favorites", rest @ ..] => {
+            let rest: Vec<&str> = if one { vec![] } else { rest.to_vec() };
+            Some(favorites_cmd(&rest, args))
+        }
         _ => None,
+    }
+}
+
+/// `favorites`：常用应用的管理（列表 / 删除 / 编辑）。
+///
+/// 与面板「常用」区同源 —— 同一份配置里的 favorites。
+fn favorites_cmd(rest: &[&str], args: &Args) -> i32 {
+    let json_mode = args.json_mode();
+    match rest {
+        [] | ["list"] => {
+            let list = favorites::read_favorites();
+            let data = json!({ "favorites": list.iter().map(|f| f.to_json()).collect::<Vec<_>>() });
+            let text = if list.is_empty() {
+                "常用为空".to_string()
+            } else {
+                list.iter()
+                    .map(|f| match &f.title {
+                        Some(t) => format!("{}  {}（{}）", f.name, f.base, t),
+                        None => format!("{}  {}", f.name, f.base),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            commands::emit(commands::Outcome { data, text }, json_mode)
+        }
+        ["remove", name] => {
+            let mut params = serde_json::Map::new();
+            params.insert("name".into(), json!(name));
+            match control::remove_favorite_api(&params) {
+                Ok(data) => {
+                    let removed = data["removed"].as_bool().unwrap_or(false);
+                    let text = if removed {
+                        format!("已删除常用 {name}")
+                    } else {
+                        format!("常用里没有 {name}")
+                    };
+                    commands::emit(commands::Outcome { data, text }, json_mode)
+                }
+                Err(e) => commands::emit_error(&e.message, e.code, json_mode),
+            }
+        }
+        ["update", name] => {
+            let base = args.flag("base");
+            let title = args.flag("title");
+            if base.is_none() && title.is_none() {
+                return commands::emit_error(
+                    "用法: mn-ws favorites update <名字> --base http://127.0.0.1:9999 [--title 显示名]",
+                    "bad_input",
+                    json_mode,
+                );
+            }
+            let mut params = serde_json::Map::new();
+            params.insert("name".into(), json!(name));
+            if let Some(b) = base {
+                params.insert("base".into(), json!(b));
+            }
+            if let Some(t) = title {
+                params.insert("title".into(), json!(t));
+            }
+            match control::update_favorite_api(&params) {
+                Ok(data) => commands::emit(
+                    commands::Outcome { data, text: format!("已更新常用 {name}") },
+                    json_mode,
+                ),
+                Err(e) => commands::emit_error(&e.message, e.code, json_mode),
+            }
+        }
+        _ => commands::emit_error(
+            "用法: mn-ws favorites [list] | favorites remove <名字> | favorites update <名字> --base <基址> [--title <显示名>]",
+            "bad_input",
+            args.json_mode(),
+        ),
     }
 }
 
@@ -883,6 +962,9 @@ fn print_help() {
     println!("  apps reopen <名字> 一键重新暴露一个用过的应用");
     println!("  apps set           设白名单（--apps a,b=http://127.0.0.1:7800）");
     println!("  apps known         列出已登记的应用");
+    println!("  favorites list     列出常用（一键重开的记忆）");
+    println!("  favorites remove   删掉一条常用（--name 或位置参数）");
+    println!("  favorites update   编辑一条常用（--base 基址 --title 显示名）");
     println!("  catalog            拉远端目录");
     println!("  auth login         登录统一登录平台");
     println!("  auth list          列出已存账号");
@@ -926,6 +1008,13 @@ fn print_sub_help(sub: Option<&str>) {
              reopen mn-ws apps reopen <名字>   一键重新暴露一个用过的应用\n\
              set    mn-ws apps set --apps my-api,other=http://127.0.0.1:7800\n\
              known  列出已登记的应用"
+        ),
+        "favorites" => println!(
+            "mn-ws favorites list|remove|update\n\n\
+             list   列出常用\n\
+             remove mn-ws favorites remove <名字>\n\
+             update mn-ws favorites update <名字> --base http://127.0.0.1:9999 [--title 显示名]\n\n\
+             路由标识不可改 —— reopen 靠它重开。"
         ),
         "auth" => println!(
             "mn-ws auth login|list|switch|status|logout|prune\n\n\

@@ -208,6 +208,30 @@ async function main() {
       JSON.stringify(knownJson).slice(0, 200),
     );
 
+    // ── 常用的编辑与删除（注册会自动记忆常用）──
+    const favUpd = await fetch(`${base}/api/bridge/favorites/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'my-api', base: 'http://127.0.0.1:9913', title: '改过' }),
+    });
+    const favUpdJson = await favUpd.json();
+    check(
+      'POST /api/bridge/favorites/update → 200 且基址已换',
+      favUpd.status === 200 && favUpdJson.ok === true && favUpdJson.data.base === 'http://127.0.0.1:9913',
+      JSON.stringify(favUpdJson).slice(0, 160),
+    );
+    const favDel = await fetch(`${base}/api/bridge/favorites/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'my-api' }),
+    });
+    const favDelJson = await favDel.json();
+    check(
+      'POST /api/bridge/favorites/remove → 200 且真删了',
+      favDel.status === 200 && favDelJson.ok === true && favDelJson.data.removed === true,
+      JSON.stringify(favDelJson).slice(0, 160),
+    );
+
     const removeApp = await fetch(`${base}/api/bridge/apps/remove`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

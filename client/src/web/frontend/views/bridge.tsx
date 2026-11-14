@@ -137,6 +137,41 @@ export default function BridgeView() {
     }
   }
 
+  // ── 常用的管理（CRUD 的 U 与 D）───────────────────────────────────
+  // 「管理」开着时：芯片不再一键重开，改出编辑与删除；编辑是行内小表单。
+  const [managing, setManaging] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editBase, setEditBase] = useState('');
+  const [editTitle, setEditTitle] = useState('');
+
+  function startEdit(name: string, base: string, title?: string) {
+    setEditing(name);
+    setEditBase(base);
+    setEditTitle(title ?? '');
+  }
+
+  async function favRemove(name: string) {
+    await run(async () => {
+      const r = await client['bridge.favorites.remove']({ name });
+      if (!r.ok) { setError(r.error || '删除失败'); return; }
+      if (editing === name) setEditing(null);
+    });
+  }
+
+  async function favSave() {
+    const name = editing;
+    if (!name) return;
+    await run(async () => {
+      const r = await client['bridge.favorites.update']({
+        name,
+        base: editBase.trim(),
+        title: editTitle.trim(),
+      });
+      if (!r.ok) { setError(r.error || '保存失败'); return; }
+      setEditing(null);
+    });
+  }
+
   async function toggle(app: string, on: boolean) {
     const next = new Set(selected);
     if (on) next.add(app); else next.delete(app);
@@ -280,26 +315,80 @@ export default function BridgeView() {
         </div>
       </div>
 
-      {/* 常用：用过就能一键重开，不必重新敲路由标识与端口 */}
+      {/* 常用：用过就能一键重开；「管理」里能改基址/显示名、删掉不要的 */}
       {favorites.length > 0 && (
         <div className="card">
-          <div className="colhead">常用</div>
+          <div className="colhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>常用</span>
+            <button
+              className="btn small ghost"
+              disabled={busy}
+              onClick={() => { setManaging(!managing); setEditing(null); }}
+            >
+              {managing ? '完成' : '管理'}
+            </button>
+          </div>
           <div style={{ padding: 12 }} className="stack">
-            <div className="muted">点一下就能重新暴露，不用再填名字和端口。</div>
+            <div className="muted">
+              {managing
+                ? '点芯片改基址或显示名，下方 ✕ 删掉不要的。路由标识不可改 —— 重开靠它。'
+                : '点一下就能重新暴露，不用再填名字和端口。'}
+            </div>
             <div className="toolbar">
               {favorites.map((f) => (
                 <button
                   key={f.name}
                   className="btn small ghost"
                   disabled={busy}
-                  title={`${f.base}`}
-                  onClick={() => { void reopen(f.name); }}
+                  title={managing ? `编辑 ${f.name}` : `${f.base}`}
+                  onClick={() => {
+                    if (managing) { startEdit(f.name, f.base, f.title); } else { void reopen(f.name); }
+                  }}
                 >
+                  {managing ? '✎ ' : ''}
                   {f.title ? f.title : f.name}
                   <span className="muted"> {f.base.replace(/^https?:\/\/[^/]+/, '')}</span>
                 </button>
               ))}
             </div>
+            {managing && (
+              <div className="toolbar">
+                {favorites.map((f) => (
+                  <button
+                    key={`del-${f.name}`}
+                    className="btn small ghost"
+                    disabled={busy}
+                    title={`删除 ${f.name}`}
+                    onClick={() => { void favRemove(f.name); }}
+                  >
+                    ✕ {f.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            {managing && editing && (
+              <div className="stack" style={{ gap: 6 }}>
+                <div className="muted">正在编辑：{editing}</div>
+                <div className="toolbar">
+                  <input
+                    value={editBase}
+                    placeholder="基址，如 http://127.0.0.1:9999"
+                    onChange={(e) => setEditBase(e.target.value)}
+                  />
+                  <input
+                    value={editTitle}
+                    placeholder="显示名（可空）"
+                    onChange={(e) => setEditTitle(e.target.value)}
+                  />
+                  <button className="btn small" disabled={busy || !editBase.trim()} onClick={() => { void favSave(); }}>
+                    保存
+                  </button>
+                  <button className="btn small ghost" disabled={busy} onClick={() => setEditing(null)}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
