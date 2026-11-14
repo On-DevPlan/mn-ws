@@ -144,6 +144,11 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
+      # 交叉编译目标必须显式装（darwin-x64 在 arm runner 上编 x64 时，
+      # 缺了就报 E0463 "can't find crate for core"）
+      - name: 安装 Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: 编译 Rust 产物
         shell: bash
         working-directory: rust
