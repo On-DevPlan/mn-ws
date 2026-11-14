@@ -1,26 +1,17 @@
-// 按平台生成 npm 包的 `bin` 字段。
+// 按平台派生 npm 分发相关的标识与文件名。
 //
-// ## 为什么要在打包时改写 package.json
+// ## 分发模型（0.7.2 起，esbuild / rollup 同款）
 //
-// npm 的 `bin` 字段指向**一个确切的文件名**（npm 不做扩展名补全 ——
-// 实测：指向 `./bin/mn-ws` 而文件是 `./bin/mn-ws.exe` 时，
-// npm 找不到目标，**不生成 shim**，还会把那个路径从包里移走）。
+// 原生二进制住进**平台子包** mn-ws-<platform>-<arch>（由
+// scripts/make-platform-pkg.mjs 生成），主包 mn-ws 的 bin 是启动器
+// （client/bin/mn-ws.js），按当前平台解析子包里的二进制并转发。
+// npm 按 os / cpu 字段只装匹配平台的那一个子包。
 //
-// Windows 要 `.exe`、Unix 不要 —— 同一份 package.json 满足不了。
+// 本文件提供：当前平台的 key（子包名后缀）、Rust target 三元组、
+// 二进制文件名（Windows 要 .exe）。
 //
-// ## 解法
-//
-// 打包时按当前平台改写 `bin` 字段，让它指向**真实存在的那个文件名**。
-// CI 在每个平台各自 build + pack，于是每个平台发布的包都自洽。
-//
-// ## 为什么这是安全的
-//
-// 已实测：npm 为原生 exe 生成的 shim **直接调 exe，不经过 node**
-//   （Windows .cmd：`"%dp0%\..\<pkg>\bin\<name>.exe" %*`）
-// 所以「运行时零 Node 依赖」在装完之后真的成立。
-
-import fs from 'node:fs';
-import path from 'node:path';
+// （0.6/0.7.1 时代「打包时改写 bin 字段」的 patchBinField 已随旧模型移除 ——
+// 现在主包的 bin 固定指向启动器，不再按平台变。）
 
 /** 平台标识。 */
 export function platformKey() {
@@ -49,35 +40,4 @@ export function rustTarget() {
 /** 二进制文件名（Windows 要 .exe）。 */
 export function binaryName(stem) {
   return process.platform === 'win32' ? `${stem}.exe` : stem;
-}
-
-/**
- * 改写 package.json 的 `bin` 字段，让它指向当前平台的真实文件名。
- *
- * 只改 `bin` —— 其它字段（版本、依赖、files）原样保留，
- * 免得「为了改 bin 而动了发版元数据」。
- *
- * @param {string} pkgDir  包目录
- * @param {string} stem    二进制的名字（mn-ws / mn-ws-server）
- * @returns {string} 改写后的 bin 目标路径
- */
-export function patchBinField(pkgDir, stem) {
-  const pkgJsonPath = path.join(pkgDir, 'package.json');
-  const raw = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
-  const fileName = binaryName(stem);
-  const target = `./bin/${fileName}`;
-
-  // 先确认目标文件真的在 —— 不在就当场报错，别让 npm 静默地不生成 shim。
-  const abs = path.join(pkgDir, 'bin', fileName);
-  if (!fs.existsSync(abs)) {
-    throw new Error(
-      `二进制不存在：${abs}\n` +
-      `先构建：cd rust && cargo build --release\n` +
-      `然后：node scripts/install-rust-bin.mjs ${stem === 'mn-ws' ? 'client' : 'server'}`,
-    );
-  }
-
-  raw.bin = { [stem]: target };
-  fs.writeFileSync(pkgJsonPath, JSON.stringify(raw, null, 2) + '\n');
-  return target;
 }

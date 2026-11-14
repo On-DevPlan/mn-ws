@@ -57,34 +57,56 @@ rust/
 
 ---
 
-## 3. 分发：原生二进制随 npm 走
+## 3. 分发：原生二进制随 npm 走（平台子包模式）
 
-### 3.1 结论
+### 3.1 模型（0.7.2 起，esbuild / rollup 同款）
 
-**npm 的 `bin` 指向原生二进制时，npm 生成的 shim 直接调它，不经过 node。**
-已实测（`scripts/verify-dist.mjs`）：
+一个包名一个版本在 npm 上只能有一份 tarball，而原生二进制按平台不同 ——
+所以二进制住进**平台子包**，主包只带启动器与平台无关的产物：
 
-- Windows 的 `.cmd` shim 内容：`"%dp0%\..\<pkg>\bin\<name>.exe" %*` —— **没有 node**
-- 把 node 从 `PATH` 里**彻底移除**后，`mn-ws --version` 照样返回 `mn-ws 0.6.1`
+```
+mn-ws                 主包：bin/mn-ws.js（启动器）+ web/public（React 产物）
+  optionalDependencies → 平台子包（npm 按 os/cpu/libc 只装匹配的那个）：
+  mn-ws-win32-x64      bin/mn-ws.exe        x86_64-pc-windows-msvc
+  mn-ws-darwin-x64     bin/mn-ws            x86_64-apple-darwin
+  mn-ws-darwin-arm64   bin/mn-ws            aarch64-apple-darwin
+  mn-ws-linux-x64      bin/mn-ws            x86_64-unknown-linux-gnu（glibc）
+```
 
-### 3.2 踩到的坑：npm 不做扩展名补全
+用户敲 `mn-ws` → npm shim → 启动器按当前平台 `require.resolve` 子包里的
+二进制 → spawn（stdio 直通、退出码透传）。面板产物平台无关，只此一份；
+启动器在用户没设 `MN_WS_WEB_DIR` 时把它指到主包的 `web/public`
+（Rust `web_dir()` 的第一优先级）。
 
-`bin` 指向 `./bin/mn-ws` 而文件是 `./bin/mn-ws.exe` 时：
+**为什么启动器走 Node 不损失什么**：装 npm 包必然经过 npm（即必然有 Node）。
+「零 Node 依赖」的确切含义是**二进制本身**运行时不依赖 Node
+（build-rust 的冒烟里显式移除 PATH 上的 node 验证）。
 
-- npm **找不到目标** → **不生成 shim**
-- 更糟：npm 会把那个路径**从包里移走**（实测 `bin/` 目录装完是空的）
+子包是 pnpm workspace 成员（`client/platform/<key>/package.json` 入库，
+`bin/` 不入库），主包用 `workspace:*` 引用 —— 本地装包不碰 registry，
+`pnpm pack` 时自动重写成具体版本。发布顺序：平台矩阵先发 4 个子包，
+全部成功后主包收尾（release.yml 三个 job）。
 
-所以 `bin` 字段必须指向**当前平台真实存在的文件名**。
-解法：打包时按平台改写 `package.json` 的 `bin`（`scripts/platform-bin.mjs`），
-CI 在每个平台各自 build + 各自 pack —— 每个平台发布的包自洽。
+### 3.2 为什么改掉「单包带二进制」的旧模型
 
-### 3.3 多平台
+0.6.x～0.7.1 的做法是「打包时按平台改写 bin 字段，每平台各自 pack」。
+它有两个致命问题，0.7.1 实测踩中后者：
 
-CI（`.github/workflows/build-rust.yml`）编译四个平台：
-`win32-x64` / `darwin-x64` / `darwin-arm64` / `linux-x64`，
-每个平台打一个 npm 包。
+1. **一个版本只能发一份 tarball**。release.yml 在 ubuntu 上构建并发布 ——
+   Windows 用户装到的是 Linux ELF + 指向无扩展名文件的 bin，装完即坏。
+   build-rust.yml 里「每平台各自 pack」的产物从未真正发布过，设计只做了一半。
+2. npm 不做扩展名补全：bin 指向 `./bin/mn-ws` 而文件是 `mn-ws.exe` 时，
+   npm 找不到目标、不生成 shim，还会把该路径从包里移走（实测）。
 
-**发布的包只含当前平台的产物** —— 用户 `npm i -g mn-ws` 装到的是他所在平台的版本。
+平台子包模式把「平台差异」交给 npm 的 os/cpu 机制处理，单 tarball 的
+平台歧义从结构上消失。
+
+### 3.3 多平台编译
+
+CI（`.github/workflows/build-rust.yml`）在四个平台编译 + 单测 +
+无 Node 冒烟 + 子包生成 + 主包 tarball 组装校验（不发布）；
+`release.yml` 在四个平台各自编译并发布子包（win32-x64 / darwin-x64 /
+darwin-arm64 / linux-x64），全绿后发主包。
 
 ---
 
@@ -126,7 +148,9 @@ e2e             8 条   真起服务、真打穿
 
 ### 4.5 分发实测（`scripts/verify-dist.mjs`）
 
-打包 → 装到隔离目录 → **把 node 从 PATH 移除** → 跑。
+平台子包 → 主包 tarball → 隔离目录安装 → 敲 `mn-ws` 跑通（启动器 → 二进制）；
+再**把 node 从 PATH 移除**直接跑二进制本体 —— 「二进制运行时零 Node 依赖」
+的固化证明（启动器本来就要 Node，二进制不）。
 
 ---
 

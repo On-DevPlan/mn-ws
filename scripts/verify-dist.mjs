@@ -1,15 +1,18 @@
-// 分发实测：打包 → 装到临时目录 → **把 node 从 PATH 移除** → 跑。
+// 分发实测：新模型（平台子包）的端到端验证。
 //
-// ## 为什么必须「把 node 从 PATH 移除」
+// ## 验什么
 //
-// 这是整套重构的**核心承诺**：运行时零 Node 依赖。
-//
-// 只测「`mn-ws --version` 能跑」是不够的 —— 那可能只是碰巧 PATH 里有 node。
-// 真正的证明是：**把 node 从 PATH 里彻底拿掉，它照样能跑**。
-// 上一轮已用三个候选包验过这个（POSIX sh / .cmd / 原生 exe），
-// 结论是「原生 exe 作为 npm bin」可行 —— 这条脚本把那个证明固化成可复跑的检查。
+//   1. 主包能 pack（pnpm pack 把 optionalDependencies 的 workspace:*
+//      重写成具体版本 —— npm publish 不认 workspace 协议）
+//   2. 平台子包能生成并 pack（make-platform-pkg.mjs + npm pack）
+//   3. 两个 tarball 装进隔离目录 → npm 生成 shim → 敲 `mn-ws` 真能跑
+//      （启动器 → 平台子包里的二进制 → 退出码/输出透传）
+//   4. **把 node 从 PATH 移除后，平台子包里的二进制本体照样能跑** ——
+//      「二进制运行时零 Node 依赖」这条承诺的证明（启动器本来就要
+//      Node，但二进制不；分两步各自证明）
 //
 // 跑法：node scripts/verify-dist.mjs
+// 前置：cd rust && cargo build --release && pnpm --filter mn-ws build
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -29,22 +32,17 @@ function check(name, cond, detail = '') {
   }
 }
 
+const IS_WIN = process.platform === 'win32';
+const EXE = IS_WIN ? 'mn-ws.exe' : 'mn-ws';
+
 /** 找一个「有 node 的目录」，用来把它从 PATH 里挖掉。 */
 function nodeDir() {
-  const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['node'], {
-    encoding: 'utf8',
-  });
+  const which = spawnSync(IS_WIN ? 'where' : 'which', ['node'], { encoding: 'utf8' });
   const first = (which.stdout || '').split(/\r?\n/).find(Boolean);
   return first ? path.dirname(first) : null;
 }
 
-/**
- * 在「没有 node 的 PATH」下跑一个命令。
- *
- * Windows 上不能直接 spawn `.cmd`（EINVAL）—— 要经 cmd.exe。
- * cmd.exe 在 System32 里，而 node 通常**不在** System32，
- * 所以把 System32 加回去不违背「移除 node」的前提。
- */
+/** 在「没有 node 的 PATH」下跑一个命令。 */
 function runWithoutNode(cmd, args) {
   const without = nodeDir();
   const kept = (process.env.PATH || '')
@@ -52,121 +50,111 @@ function runWithoutNode(cmd, args) {
     .filter((p) => p && path.resolve(p) !== path.resolve(without || ''));
   const newPath = kept.join(path.delimiter);
 
-  if (process.platform === 'win32') {
-    const system32 = path.join(
-      process.env.SystemRoot || 'C:\\Windows',
-      'System32',
-    );
-    // ⚠️ cmd 的引号规则很绕（外层引号会被剥掉），绕开它：
-    //   用 `cmd /c call <shim>`，让 cmd 自己去解析 shim 的路径。
-    //   这也更贴近用户真实形态 —— 用户敲 `mn-ws`，靠 PATH 找 shim。
+  if (IS_WIN) {
+    const system32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+    // cmd 的引号规则很绕（外层引号会被剥掉）—— 用 `cmd /c call <shim>` 绕开
     const r = spawnSync('cmd.exe', ['/d', '/c', 'call', cmd, ...args], {
       encoding: 'utf8',
       cwd: path.dirname(cmd),
-      env: {
-        ...process.env,
-        PATH: [system32, newPath].filter(Boolean).join(path.delimiter),
-        NODE: '',
-      },
+      env: { ...process.env, PATH: [system32, newPath].filter(Boolean).join(path.delimiter) },
     });
     return r;
   }
   return spawnSync(cmd, args, {
     encoding: 'utf8',
-    env: { ...process.env, PATH: newPath, NODE: '' },
+    env: { ...process.env, PATH: newPath },
   });
 }
 
-console.log('分发实测：npm 包里的原生二进制，零 Node 依赖');
+console.log('分发实测：平台子包模型（主包 + 启动器 + 平台二进制）');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mn-ws-dist-'));
 console.log(`  临时目录：${tmp}`);
+fs.mkdirSync(path.join(tmp, 'tgz'), { recursive: true });
+const tgzDir = path.join(tmp, 'tgz');
 
-for (const pkg of ['client', 'server']) {
-  const pkgDir = path.join(repoRoot, pkg);
-  const name = pkg === 'client' ? 'mn-ws' : 'mn-ws-server';
-  const version = JSON.parse(
-    fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'),
-  ).version;
+// ── ① 平台子包：生成 + 打包 ──
+console.log('\n[平台子包]');
+const mk = spawnSync('node', [path.join(repoRoot, 'scripts', 'make-platform-pkg.mjs')], {
+  cwd: repoRoot,
+  encoding: 'utf8',
+  shell: IS_WIN,
+});
+check('make-platform-pkg 成功', mk.status === 0, (mk.stderr || '').slice(0, 200));
+if (mk.status !== 0) process.exit(1);
 
-  // ── 打包 ──
-  //
-  // 用 `pnpm pack` 而不是 `npm pack`：client 包的依赖里有 `workspace:*`，
-  // pnpm pack 会把它重写成具体版本（npm pack 不会 —— 装的时候直接报
-  // `Unsupported URL Type "workspace:"`）。
-  console.log(`\n[${name}] 打包`);
-  const pack = spawnSync('pnpm', ['pack', '--pack-destination', tmp], {
-    cwd: pkgDir,
-    encoding: 'utf8',
-    shell: process.platform === 'win32',
-  });
-  if (pack.status !== 0) {
-    check(`${name} 打包成功`, false, (pack.stderr || pack.stdout || '').slice(0, 300));
-    continue;
-  }
-  const tgz = fs
-    .readdirSync(tmp)
-    .filter((f) => f.startsWith(`${name}-`) && f.endsWith('.tgz'))
-    .map((f) => path.join(tmp, f))
-    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
-  check(`${name} 打包成功`, !!tgz, tgz);
-  if (!tgz) continue;
-  const sizeKb = Math.round(fs.statSync(tgz).size / 1024);
-  console.log(`    tarball: ${path.basename(tgz)}（${sizeKb} KB）`);
+const key = execFileSync('node', [path.join(repoRoot, 'scripts', 'make-platform-pkg.mjs'), '--list'], {
+  cwd: repoRoot, encoding: 'utf8',
+}).trim();
+const platDir = path.join(repoRoot, 'client', 'platform', key);
+const platPkg = JSON.parse(fs.readFileSync(path.join(platDir, 'package.json'), 'utf8'));
 
-  // ── 安装到隔离目录 ──
-  //
-  // ⚠️ client 包依赖 `mn-ws-server`（同版本）。首版发布时 server 半还没上 npm，
-  //    装 client 会 ETARGET —— 那是**预期的**（release.yml 就是先发 server、
-  //    等它被提升、再发 client）。所以这种情况跳过 client 的安装检查，
-  //    并明确说明，而不是把它当成失败。
-  const installDir = path.join(tmp, `install-${name}`);
-  fs.mkdirSync(installDir, { recursive: true });
-  const inst = spawnSync(
-    'npm',
-    ['install', '--no-audit', '--no-fund', '--omit=dev', '--prefix', installDir, tgz],
-    { encoding: 'utf8', shell: process.platform === 'win32' },
-  );
-  if (inst.status !== 0) {
-    const err = (inst.stderr || '').slice(0, 300);
-    const dependsOnServer = /ETARGET/.test(err) && name === 'mn-ws';
-    if (dependsOnServer) {
-      console.log(
-        `    ⓘ ${name} 装不上：依赖的 mn-ws-server@${version} 还没上 npm（首版发布的正常状态）`,
-      );
-      console.log('    ⓘ 等 server 半发布并被提升后重跑本脚本');
-      continue;
-    }
-    check(`${name} 安装成功`, false, err);
-    continue;
-  }
-  check(`${name} 安装成功`, true);
+const platPack2 = spawnSync('npm', ['pack', '--pack-destination', tgzDir], {
+  cwd: platDir, encoding: 'utf8', shell: IS_WIN,
+});
+check(`mn-ws-${key} 打包成功`, platPack2.status === 0, (platPack2.stderr || '').slice(0, 200));
+const platTgz = path.join(tgzDir, `${platPkg.name}-${platPkg.version}.tgz`);
+check('平台子包 tarball 存在', fs.existsSync(platTgz), platTgz);
 
-  const binDir = path.join(installDir, 'node_modules', '.bin');
-  const shim = path.join(binDir, process.platform === 'win32' ? `${name}.cmd` : name);
-  check(`${name} 生成了 shim`, fs.existsSync(shim), shim);
+// ── ② 主包：打包（workspace:* 必须被重写）──
+console.log('\n[主包]');
+const mainPack = spawnSync('pnpm', ['pack', '--pack-destination', tgzDir], {
+  cwd: path.join(repoRoot, 'client'), encoding: 'utf8', shell: IS_WIN,
+});
+check('mn-ws 打包成功', mainPack.status === 0, (mainPack.stderr || '').slice(0, 200));
+const mainVer = JSON.parse(
+  fs.readFileSync(path.join(repoRoot, 'client', 'package.json'), 'utf8'),
+).version;
+const mainTgz = path.join(tgzDir, `mn-ws-${mainVer}.tgz`);
+check('主包 tarball 存在', fs.existsSync(mainTgz), mainTgz);
 
-  // ── shim 里有没有 "node" ──
-  // Windows 的 .cmd shim 通常是 `node "%~dp0\..\lib\..."`；
-  // 原生 exe 的 shim 应该是直接调 exe。
-  if (fs.existsSync(shim)) {
-    const content = fs.readFileSync(shim, 'utf8');
-    const callsNode = /(^|[\s"'=])node(\.exe)?[\s"]/i.test(content);
-    check(`${name} 的 shim 不经过 node`, !callsNode, content.slice(0, 160).replace(/\n/g, ' '));
-  }
-
-  // ── **把 node 从 PATH 移除**，然后跑 ──
-  const r = runWithoutNode(shim, ['--version']);
-  const out = (r.stdout || '') + (r.stderr || '');
-  check(
-    `${name} 在没有 node 的 PATH 下仍能跑`,
-    r.status === 0 && out.trim().length > 0,
-    `status=${r.status} err=${(r.error && r.error.message) || ''} out=${out.slice(0, 200)}`,
-  );
-  if (r.status === 0) {
-    console.log(`    --version → ${out.trim()}`);
-  }
+// tarball 里的 optionalDependencies 必须已是具体版本
+const tar = spawnSync('tar', ['-xzOf', mainTgz, 'package/package.json'], { encoding: 'utf8', shell: IS_WIN });
+const packedJson = tar.status === 0 ? JSON.parse(tar.stdout) : null;
+check('tarball 可读', !!packedJson, (tar.stderr || '').slice(0, 200));
+if (packedJson) {
+  const opt = packedJson.optionalDependencies || {};
+  const rewritten = Object.values(opt).every((v) => /^\d+\.\d+\.\d+/.test(v));
+  check('optionalDependencies 已重写成具体版本（不再是 workspace:*）', rewritten, JSON.stringify(opt));
 }
+
+// ── ③ 安装 + 启动器跑通 ──
+console.log('\n[安装]');
+const installDir = path.join(tmp, 'install');
+fs.mkdirSync(installDir, { recursive: true });
+// ⚠️ 必须先有 package.json —— 没有的话 npm 会向上找项目根，
+//    找到用户主目录就把包装进 HOME（实测）。
+fs.writeFileSync(
+  path.join(installDir, 'package.json'),
+  JSON.stringify({ name: 'mn-ws-dist-check', private: true, version: '0.0.0' }, null, 2) + '\n',
+);
+const inst = spawnSync(
+  'npm',
+  ['install', '--no-audit', '--no-fund', mainTgz, platTgz],
+  { cwd: installDir, encoding: 'utf8', shell: IS_WIN },
+);
+check('主包 + 平台子包安装成功', inst.status === 0, (inst.stderr || '').slice(0, 300));
+
+const shim = path.join(installDir, 'node_modules', '.bin', IS_WIN ? 'mn-ws.cmd' : 'mn-ws');
+check('npm 生成了 mn-ws shim', fs.existsSync(shim), shim);
+
+// ── ④ 带 node 跑 shim：启动器 → 二进制 ──
+const withNode = spawnSync(shim, ['--version'], { encoding: 'utf8', shell: IS_WIN });
+const withNodeOut = ((withNode.stdout || '') + (withNode.stderr || '')).trim();
+check('mn-ws --version 能跑（启动器 → 平台二进制）', withNode.status === 0 && withNodeOut.length > 0,
+  `status=${withNode.status} out=${withNodeOut.slice(0, 120)}`);
+if (withNode.status === 0) console.log(`    --version → ${withNodeOut}`);
+check('启动器报告的版本与主包一致', withNodeOut === mainVer, `期望 ${mainVer}`);
+
+// ── ⑤ 无 node 跑二进制本体：零 Node 依赖的证明 ──
+console.log('\n[零 Node 依赖证明（二进制本体）]');
+const platBin = path.join(installDir, 'node_modules', platPkg.name, 'bin', EXE);
+check('平台二进制随包装上', fs.existsSync(platBin), platBin);
+const r = runWithoutNode(platBin, ['--version']);
+const out = ((r.stdout || '') + (r.stderr || '')).trim();
+check('二进制在没有 node 的 PATH 下仍能跑', r.status === 0 && out.length > 0,
+  `status=${r.status} out=${out.slice(0, 200)}`);
+if (r.status === 0) console.log(`    --version → ${out}`);
 
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 条失败`);
 process.exit(failures === 0 ? 0 : 1);

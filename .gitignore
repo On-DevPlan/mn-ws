@@ -28,3 +28,6 @@ server/bin/mn-ws-server.exe
 # React 构建产物在 npm 包里的位置（client/web/public）。
 # 产物不入库 —— 由 `pnpm build` + `install-rust-bin.mjs` 生成。
 client/web/
+
+# 平台子包里的二进制同理（package.json 入库，bin/ 由 make-platform-pkg.mjs 生成）。
+client/platform/*/bin/

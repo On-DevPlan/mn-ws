@@ -1,39 +1,36 @@
 #!/usr/bin/env node
-// 把 Rust 产物装进 npm 包，并把 `bin` 字段改写成当前平台的真实文件名。
+// 把 Rust 产物与 React 产物装进**本地开发布局**。
 //
-// ## 为什么 npm 包里带的是**原生二进制**而不是 JS
+// ## 它在分发模型里的位置（0.7.2 起）
 //
-// 这个包要「运行时零 Node 依赖」—— 用户装完直接跑 `mn-ws serve`，
-// 机器上**没有 Node 也能用**。
+// npm 分发走**平台子包**模式：主包 mn-ws 的 bin 是启动器
+// （client/bin/mn-ws.js，已入库），平台二进制由
+// scripts/make-platform-pkg.mjs 生成的 mn-ws-<key> 子包携带。
+// 所以**发布链路不再用本脚本改写 bin 字段** —— 那是 0.6/0.7.1 时代
+// 「单包内带当前平台二进制」的老模型。
 //
-// npm 的 `bin` 字段指向一个文件，npm 会为它生成 shim。已实测：
-// 当目标是原生 exe 时，shim **直接调 exe**（Windows 上是
-// `"%dp0%\..\<pkg>\bin\<name>.exe" %*`），**不经过 node**。
-//
-// ## 为什么要在打包时改写 bin 字段
-//
-// npm 不做扩展名补全：bin 指向 `./bin/mn-ws` 而文件是 `./bin/mn-ws.exe` 时，
-// npm 找不到目标、**不生成 shim**，还会把那个路径从包里移走（实测）。
-// Windows 要 `.exe`、Unix 不要 —— 同一份 package.json 满足不了，
-// 所以按平台改写。CI 在每个平台各自 pack，各平台的自洽。
+// 本脚本现在是**本地开发**助手：
+//   · 把当前平台的 Rust 产物拷到 client/bin/（run-local.mjs 优先跑它）
+//   · 把 React 产物拷到 client/web/public（主包 pack 的 files 之一）
 //
 // 用法：
-//   node scripts/install-rust-bin.mjs client    # client 包
-//   node scripts/install-rust-bin.mjs server    # server 包
-//   node scripts/install-rust-bin.mjs all       # 两个都装
+//   node scripts/install-rust-bin.mjs client    # 二进制 + web 产物
+//   node scripts/install-rust-bin.mjs web       # 只装 web 产物（发布主包前）
+//   node scripts/install-rust-bin.mjs server    # server 包（不发 npm，仅本地）
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { binaryName } from './platform-bin.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
 
-export { platformKey, rustTarget, binaryName, patchBinField } from './platform-bin.mjs';
-import { binaryName, patchBinField } from './platform-bin.mjs';
+export { platformKey, rustTarget, binaryName } from './platform-bin.mjs';
 
 /**
- * 把 Rust 产物拷进 npm 包，并改写 bin 字段。
+ * 把 Rust 产物拷进包的 bin/ 目录（本地开发布局；不改写 bin 字段 ——
+ * 主包的 bin 固定指向已入库的启动器）。
  *
  * @param {object} opts
  * @param {string} opts.rustBinary  Rust 产物的路径
@@ -56,17 +53,10 @@ export function installBinary({ rustBinary, pkgDir, stem }) {
   if (process.platform !== 'win32') {
     fs.chmodSync(dest, 0o755);
   }
-  const binTarget = patchBinField(pkgDir, stem);
-  return { dest, binTarget };
+  return { dest };
 }
 
-/** 把 React 产物拷进包（client 半需要）。
- *
- * 落在 `web/public` —— 发布布局是「二进制与产物目录并排」：
- *   node_modules/mn-ws/bin/mn-ws[.exe]
- *   node_modules/mn-ws/web/public/index.html
- * Rust 侧的 `web_dir()` 按「可执行文件同级 web/public」找它。
- */
+/** 把 React 产物拷进包（主包发布要带；落 `web/public`，files 之一）。 */
 export function installWebAssets({ srcDir, destDir }) {
   if (!fs.existsSync(path.join(srcDir, 'index.html'))) {
     throw new Error(
@@ -82,19 +72,27 @@ export function installWebAssets({ srcDir, destDir }) {
 
 if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) {
   const mode = process.argv[2] || 'client';
-  const targets =
-    mode === 'all' ? ['client', 'server'] : [mode];
 
+  if (mode === 'web') {
+    const web = installWebAssets({
+      srcDir: path.join(repoRoot, 'client', 'dist', 'web', 'public'),
+      destDir: path.join(repoRoot, 'client', 'web', 'public'),
+    });
+    console.log(`[install-rust-bin] web 产物 → ${web}`);
+    process.exit(0);
+  }
+
+  const targets = mode === 'all' ? ['client', 'server'] : [mode];
   for (const t of targets) {
     const isClient = t === 'client';
     const stem = isClient ? 'mn-ws' : 'mn-ws-server';
     const pkgDir = path.join(repoRoot, isClient ? 'client' : 'server');
-    const { dest, binTarget } = installBinary({
+    const { dest } = installBinary({
       rustBinary: path.join(repoRoot, 'rust', 'target', 'release', binaryName(stem)),
       pkgDir,
       stem,
     });
-    console.log(`[install-rust-bin] ${t} → ${dest}（bin: ${binTarget}）`);
+    console.log(`[install-rust-bin] ${t} → ${dest}`);
 
     // client 半还要带上 React 产物（面板的静态资源，由二进制伺服）。
     if (isClient) {

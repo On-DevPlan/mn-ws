@@ -1,25 +1,24 @@
 # Rust 多平台编译 —— 产出可随 npm 分发的原生二进制。
 #
 # 与 mn-rt 的 `build-input-agent.yml` 同款骨架，但多编两个二进制
-# （client 半 `mn-ws` + server 半 `mn-ws-server`），且**每个平台各自 pack 一个 npm 包**。
+# （client 半 `mn-ws` + server 半 `mn-ws-server`）。
 #
-# ## 为什么每个平台发一个包
+# ## npm 分发模型（0.7.2 起，esbuild / rollup 同款）
 #
-# npm 的 `bin` 字段指向**一个确切的文件名**（npm 不做扩展名补全 ——
-# 实测：指向 `./bin/mn-ws` 而文件是 `./bin/mn-ws.exe` 时，npm 找不到目标、
-# 不生成 shim，还会把那个路径从包里移走）。
-# Windows 要 `.exe`、Unix 不要 —— 同一份 tarball 满足不了。
+# 原生二进制住进**平台子包**（mn-ws-win32-x64 等，见 scripts/make-platform-pkg.mjs），
+# 主包 `mn-ws` 的 bin 是 JS 启动器。发布由 `release.yml` 负责（平台矩阵发子包
+# → 主包收尾）；本流水线只做**校验**：四平台编译、单测、无 Node 冒烟、
+# 平台子包生成、主包 tarball 组装。
 #
-# 所以：CI 在每个平台各自 build + 各自 pack，那个平台上的包就自洽。
-# 用户 `npm i -g mn-ws` 装到的是**他所在平台**的产物。
+# 注意「零 Node 依赖」的确切含义：**二进制本身**运行时不经过 node
+# （冒烟里显式移除 PATH 上的 node 证明这一点）；用户敲 `mn-ws` 时先经过
+# 启动器（Node）再 spawn 二进制 —— 装 npm 包必然有 Node，这一跳不损失什么。
 #
 # ## 触发
 #
-#   · push 到 main 且改了 rust/ 或本文件 → 编译校验（不发布）
+#   · push 到 main 且改了 rust/、发布脚本或本文件 → 编译校验（不发布）
 #   · 打 tag v* → 四平台编译 + pack 校验
 #   · 手动触发 → 同上
-#
-# 发布到 npm 由 `release.yml` 负责（它还要处理版本号与 npm 的分阶段提升）。
 
 name: build-rust
 
@@ -31,6 +30,8 @@ on:
       - 'rust/**'
       - 'scripts/install-rust-bin.mjs'
       - 'scripts/platform-bin.mjs'
+      - 'scripts/make-platform-pkg.mjs'
+      - 'scripts/sync-optional-deps.mjs'
       - '.github/workflows/build-rust.yml'
     tags:
       - 'v*'
@@ -39,6 +40,8 @@ on:
       - 'rust/**'
       - 'scripts/install-rust-bin.mjs'
       - 'scripts/platform-bin.mjs'
+      - 'scripts/make-platform-pkg.mjs'
+      - 'scripts/sync-optional-deps.mjs'
       - '.github/workflows/build-rust.yml'
   workflow_dispatch:
 
@@ -157,7 +160,7 @@ jobs:
             exit 1
           fi
 
-      # ── 打成 npm 包（每平台一个）──
+      # ── pack 校验的准备：Node + pnpm ──
       - name: 准备 Node 与 pnpm
         uses: actions/setup-node@v4
         with:
@@ -172,30 +175,28 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # client 包要带 React 构建产物（面板的静态资源）。
-      # ⚠️ 必须在「装 Rust 产物」**之前** —— install-rust-bin.mjs 会把
-      #    client/dist/web/public 拷进 client/web/public，产物不在那儿会直接报错。
-      #
       # ⚠️ server 半也要构建：client 的 TS 代码（core/bridge.ts 等，交叉兼容测试
       #    的对照物）import `mn-ws-server/protocol` —— 那是 workspace 链接，
       #    指向 server/dist/*.js，不构建就找不到模块。
       - name: 构建 TS 产物
         run: pnpm -r --workspace-concurrency=1 build
 
-      - name: 装 Rust 产物进 npm 包并改写 bin 字段
+      # 校验发布链路在当前平台真能走通：把 target-specific 产物放到
+      # target/release（make-platform-pkg.mjs 按这个路径找），生成平台子包。
+      - name: 生成平台子包
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p rust/target/release
-          # 把 target-specific 的产物放到 target/release（脚本按这个路径找）
           cp "rust/target/${{ matrix.target }}/release/${{ matrix.client }}" \
              "rust/target/release/${{ matrix.client }}"
-          cp "rust/target/${{ matrix.target }}/release/${{ matrix.server }}" \
-             "rust/target/release/${{ matrix.server }}"
-          node scripts/install-rust-bin.mjs all
+          node scripts/make-platform-pkg.mjs
 
-      # ── 打成 npm 包（每平台一个）──
+      # ── 打成 npm 包（主包，校验 pack 能出正确的 tarball）──
       #
-      # ⚠️ 只打 client —— server 半不再发 npm（它的分发渠道是 Docker 镜像）。
+      # ⚠️ 主包 bin 是启动器（bin/mn-ws.js），平台二进制在平台子包里 ——
+      #    这里 pack 主包只验证 tarball 组装（bin/web 文件齐、workspace:*
+      #    能重写）。真正的发布由 release.yml 负责。
       - name: 打包 client
         shell: bash
         run: |

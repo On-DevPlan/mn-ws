@@ -1,3 +1,7 @@
 packages:
   - 'client'
   - 'server'
+  # 平台子包（mn-ws-win32-x64 等）：原生二进制的发布载体。
+  # 主包用 workspace:* 引用它们（本地装包不碰 registry），pnpm pack 时
+  # 重写成具体版本 —— 与 client → mn-ws-server 同一机制。
+  - 'client/platform/*'

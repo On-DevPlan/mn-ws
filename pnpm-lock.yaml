@@ -52,6 +52,27 @@ importers:
       ws:
         specifier: ^8.18.0
         version: 8.22.2
+    optionalDependencies:
+      mn-ws-darwin-arm64:
+        specifier: workspace:*
+        version: link:platform/darwin-arm64
+      mn-ws-darwin-x64:
+        specifier: workspace:*
+        version: link:platform/darwin-x64
+      mn-ws-linux-x64:
+        specifier: workspace:*
+        version: link:platform/linux-x64
+      mn-ws-win32-x64:
+        specifier: workspace:*
+        version: link:platform/win32-x64
+
+  client/platform/darwin-arm64: {}
+
+  client/platform/darwin-x64: {}
+
+  client/platform/linux-x64: {}
+
+  client/platform/win32-x64: {}
 
   server:
     dependencies:

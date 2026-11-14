@@ -1,11 +1,18 @@
-# Release —— 打附注 tag 即发版到 npm。
+# Release —— 打附注 tag 即发版到 npm（主包 + 四个平台子包）。
 #
-# 本仓库发**两个**包（monorepo）：
-#   mn-ws-server  —— server 半（公网机上的中继）
-#   mn-ws         —— client 半（本机的 CLI + Web 面板）
+# ## 分发模型（0.7.2 起，esbuild / rollup 同款）
 #
-# **发布顺序不能反**：client 半的依赖里有 mn-ws-server，
-# 先发 client 会装到一个还不存在的版本。
+# 原生二进制按平台不同，而一个包名一个版本在 npm 上只能有一份 tarball ——
+# 所以二进制住进**平台子包**（mn-ws-win32-x64 / mn-ws-darwin-x64 /
+# mn-ws-darwin-arm64 / mn-ws-linux-x64，各在**自己的平台**上编译、各带
+# os/cpu 字段），主包 `mn-ws`（bin = JS 启动器 + React 产物）通过
+# optionalDependencies 引用它们：用户装主包时 npm 只装匹配平台的那一个。
+#
+# 发布顺序不能反：先发 4 个子包（平台矩阵并行），全部成功后发主包 ——
+# 主包的依赖版本指向刚发的子包版本，先发主包会装到不存在的子包。
+#
+# 所有包**同版本同发**（子包版本由 scripts/sync-optional-deps.mjs 对齐，
+# 测试 job 里有防呆校验）。
 #
 # 为什么 tag 必须与 package.json 版本一致：
 #   npm 上同一个版本号**永远只能发一次**（重发报 E403 "cannot publish over"）。
@@ -30,8 +37,8 @@ permissions:
   id-token: write
 
 jobs:
-  publish:
-    name: 发布到 npm
+  test:
+    name: 测试
     runs-on: ubuntu-latest
 
     steps:
@@ -56,9 +63,6 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # 附注 tag 与版本号必须一致 —— 见文件头说明
-      #
-      # ⚠️ 0.7.0 起只校验 **client 包**：server 半不再发布到 npm
-      #    （它的分发渠道是 Docker 镜像），所以两个包不必同号了。
       - name: 校验 tag 与版本一致
         run: |
           set -euo pipefail
@@ -75,33 +79,24 @@ jobs:
             echo "手动触发：使用 v$CLIENT_VER"
           fi
 
+      # 防呆：主包与 4 个平台子包必须同版本。跑了 sync 脚本后 git 必须是干净的
+      # —— 有 diff 说明有人改了主包版本忘了同步子包。
+      - name: 校验平台子包版本对齐
+        run: |
+          set -euo pipefail
+          node scripts/sync-optional-deps.mjs
+          git diff --exit-code client/platform \
+            || { echo "::error::平台子包版本未与主包对齐 —— 本地跑 scripts/sync-optional-deps.mjs 后再提交"; exit 1; }
+
       - name: Build packages
         run: pnpm -r --workspace-concurrency=1 build
 
-      # ── Rust 产物 ───────────────────────────────────────────────────
-      #
-      # npm 包里带的是**原生二进制**（运行时零 Node 依赖）。
-      # 这里编当前平台的产物，装进 client 包，并把 `bin` 字段改写成
-      # 当前平台的真实文件名（npm 不做扩展名补全 ——
-      # 指向 `./bin/mn-ws` 而文件是 `./bin/mn-ws.exe` 时，npm 不生成 shim）。
-      #
-      # ⚠️ 只装 client —— server 半不再发 npm（它的分发渠道是 Docker 镜像）。
-      #
-      # ⚠️ 发布的包只含**当前平台**的产物 —— 用户装到的是他所在平台的版本。
-      #    多平台的完整矩阵见 `build-rust.yml`。
-      - name: 编译 Rust 产物
+      - name: 编译 Rust 产物（测试用）
         run: |
           set -euo pipefail
           cd rust
           cargo build --release
           cd ..
-
-      - name: 装 Rust 产物进 npm 包
-        run: node scripts/install-rust-bin.mjs client
-
-      - name: 验证发布布局
-        # 二进制能不能按发布布局找到 React 产物 —— 装完才发现就晚了。
-        run: pnpm --filter mn-ws test:layout
 
       - name: Test
         run: |
@@ -114,20 +109,87 @@ jobs:
           # Rust 面板实测：伺服 React 产物 + 全部 API 端点
           pnpm --filter mn-ws test:panel
 
-      # ── 发 client 半 ─────────────────────────────────────────────────
+  # ── 平台矩阵：每平台各自编译二进制、生成并发布子包 ─────────────────
+  platform:
+    name: 发布 ${{ matrix.key }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  key: linux-x64 }
+          - { os: windows-latest, key: win32-x64 }
+          - { os: macos-13,       key: darwin-x64 }   # Intel
+          - { os: macos-14,       key: darwin-arm64 } # Apple Silicon
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-node 只为 ~/.npmrc 的发布认证（编译本身用不到 Node）
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 编译 Rust 产物
+        run: cargo build --release
+        working-directory: rust
+
+      - name: 生成平台子包
+        run: node scripts/make-platform-pkg.mjs
+
+      - name: 发布子包
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          KEY="${{ matrix.key }}"
+          PKG="mn-ws-${KEY}"
+          VER=$(node -p "require('./client/platform/${KEY}/package.json').version")
+          if npm view "${PKG}@${VER}" version >/dev/null 2>&1; then
+            echo "${PKG}@${VER} 已在 npm 上，跳过"
+            exit 0
+          fi
+          npm publish "client/platform/${KEY}" --provenance --access public
+
+  # ── 主包：全部子包就位后发布（bin = 启动器 + React 产物）──────────
+  publish-main:
+    name: 发布 mn-ws
+    needs: platform
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 主包要带面板产物（React 构建，平台无关，只此一份）
+      - name: Build client（React 产物）
+        run: pnpm --filter mn-ws build
+
+      - name: 装 web 产物进主包
+        run: node scripts/install-rust-bin.mjs web
+
+      # ── 发主包 ─────────────────────────────────────────────────────
       #
-      # ⚠️ 0.7.0 起**只发 client 半**：
-      #   · server 半不再发 npm —— 它的分发渠道是 **Docker 镜像**
-      #     （公网机上的服务，一个 npm 包对它没有意义）。
-      #   · client 半不再依赖 mn-ws-server —— 运行时零依赖，装完就能用。
-      #
-      # 所以这里没有「先发 server、等它被 npm 提升、再发 client」那套编排了。
-      # （0.6.x 需要那套，是因为 client 依赖 mn-ws-server@同版本。）
-      #
-      # 为什么是 `pnpm pack` + `npm publish <tarball>` 而不是 `npm publish`：
-      #   pnpm pack 会把 `workspace:*` 重写成具体版本（npm publish 不认识
-      #   这个协议 —— 原样发出去的话安装方直接报 `Unsupported URL Type "workspace:"`），
-      #   而 npm publish <tarball> 保留 provenance 签名（pnpm publish 没有这个 flag）。
+      # pnpm pack 会把 optionalDependencies 里的 workspace:* 重写成具体版本
+      # （npm publish 不认识 workspace 协议），npm publish <tarball> 保留
+      # provenance 签名（pnpm publish 没有这个 flag）。
       - name: 发布 mn-ws
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -149,8 +211,8 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          # 先查再建：build-rust.yml 在同一 tag 上也会建 release，重复建会撞。
-          # （gh release edit 不认 --generate-notes —— 别用 edit 兜底）
+          # 先查再建：重复触发不会撞。Release 只留 tag 与 notes ——
+          # 二进制不挂资产（分发走 npm 平台子包 + Docker 镜像）。
           gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --generate-notes
           echo "release $TAG 已发布"
