@@ -290,9 +290,27 @@ async fn api(
         // ── bridge ──
         ("GET", "/api/bridge/status") => Ok(bridge_status(&cfg, &resolved, &handle)),
         ("GET", "/api/bridge/apps") => Ok(bridge_apps(&cfg, &resolved).await),
-        ("POST", "/api/bridge/whitelist") => set_whitelist(&cfg, &params),
-        ("POST", "/api/bridge/apps/add") => add_custom_app(&cfg, &params),
-        ("POST", "/api/bridge/apps/remove") => remove_custom_app(&cfg, &params),
+        ("POST", "/api/bridge/whitelist") => {
+            let r = set_whitelist(&cfg, &params);
+            if r.is_ok() {
+                bridge_refresh_from_config(&handle);
+            }
+            r
+        }
+        ("POST", "/api/bridge/apps/add") => {
+            let r = add_custom_app(&cfg, &params);
+            if r.is_ok() {
+                bridge_refresh_from_config(&handle);
+            }
+            r
+        }
+        ("POST", "/api/bridge/apps/remove") => {
+            let r = remove_custom_app(&cfg, &params);
+            if r.is_ok() {
+                bridge_refresh_from_config(&handle);
+            }
+            r
+        }
         ("POST", "/api/bridge/apps/reopen") => reopen_favorite(&cfg, &params),
         ("GET", "/api/bridge/catalog") => match crate::bridge::fetch_catalog(&cfg).await {
             Ok(json) => Ok(json),
@@ -899,6 +917,17 @@ fn port_of(base: &str) -> Value {
 }
 
 /// 设置白名单。
+/// 配置里的应用表变了 —— 运行中的桥**立刻热更**（换表 + 踢连接重注册）。
+///
+/// 不这么做的话，注册帧里的应用表永远停在起桥那一刻：面板上加的应用
+/// 手机上看不见，要手动停桥/起桥才出现。桥没在跑就是空操作
+/// （refresh_apps 对未连接的桥踢不出什么，下次起桥自然带新表）。
+fn bridge_refresh_from_config(handle: &crate::bridge::BridgeHandle) {
+    let cfg = config::read_config_file();
+    let resolved = config::resolve_apps(&cfg);
+    handle.refresh_apps(resolved.apps);
+}
+
 pub fn set_whitelist(cfg: &Map<String, Value>, params: &Map<String, Value>) -> Result<Value, ApiError> {
     let apps: Vec<String> = params
         .get("apps")

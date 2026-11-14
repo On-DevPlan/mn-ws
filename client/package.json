@@ -1,6 +1,6 @@
 {
   "name": "mn-ws",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "HTTP 与 WebSocket 双向桥的客户端半：把本机 nx 服务桥给远端 HTTP 客户端",
   "type": "module",
   "//main": "**没有 main / exports** —— 这个包是个 CLI 工具，不是库。发布物是「启动器 + React 构建产物」，没有 JS 入口可导入。（0.6.x 时代有 dist/index.js，那是 Node 时代的 client 半，现在由 Rust 二进制取代。）",

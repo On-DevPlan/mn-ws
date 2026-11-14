@@ -79,6 +79,9 @@ struct BridgeInner {
     /// 请求 id -> 等待槽
     pending: Mutex<HashMap<String, Pending>>,
     stopped: AtomicBool,
+    /// 应用表热更信号：refresh_apps 换完表后 notify，读循环据此断开，
+    /// 主循环的下一次 connect_once 会带**新表**重新注册。
+    kick: tokio::sync::Notify,
     /// 设备令牌（注册用）
     token: Mutex<String>,
     url: Mutex<String>,
@@ -101,6 +104,27 @@ impl BridgeHandle {
     pub fn shutdown(&self) {
         self.inner.stopped.store(true, Ordering::SeqCst);
         *self.inner.state.lock().unwrap() = BridgeState::Stopped;
+    }
+
+    /// 用新的应用表**热更**运行中的桥：换表 + 踢掉当前连接。
+    ///
+    /// 为什么必须踢：注册帧里的应用表是 connect_once 时的快照，server 的远端目录
+    /// 只认它 —— 面板上加/删应用后若不重连，目录永远停在起桥那一刻。
+    /// 踢掉后主循环退避重连，connect_once 重新读 `apps` 构注册帧。
+    ///
+    /// 应用表没变就什么都不做（返回 false），调用方不用自己 diff。
+    pub fn refresh_apps(&self, apps: Vec<(String, String)>) -> bool {
+        {
+            let mut cur = self.inner.apps.lock().unwrap();
+            if *cur == apps {
+                return false;
+            }
+            *cur = apps;
+        }
+        // 没有正在等的读循环（桥未连接/正在重连）时这是空操作 ——
+        // 下一次 connect_once 反正会读新表。
+        self.inner.kick.notify_waiters();
+        true
     }
 }
 
@@ -135,6 +159,7 @@ pub async fn start_bridge(cfg: &serde_json::Map<String, Value>, resolved: &Resol
             apps: Mutex::new(resolved.apps.clone()),
             pending: Mutex::new(HashMap::new()),
             stopped: AtomicBool::new(false),
+            kick: tokio::sync::Notify::new(),
             token: Mutex::new(token),
             url: Mutex::new(url),
             bridge_id: Mutex::new(bridge_id),
@@ -373,10 +398,17 @@ async fn serve_connection(handle: &BridgeHandle, ws: WsStream) -> Option<u16> {
     );
     let data = Arc::new(data);
 
-    // 收侧循环
+    // 收侧循环。select 上 kick：应用表热更后立刻断开，
+    // 主循环会用**新表**重新 connect_once 注册（老表在 server 的目录里随之刷新）。
     let mut close_code: Option<u16> = None;
-    while let Some(msg) = stream.next().await {
-        let Ok(msg) = msg else { break };
+    loop {
+        let msg = tokio::select! {
+            m = stream.next() => match m {
+                Some(Ok(m)) => m,
+                _ => break,
+            },
+            _ = handle.inner.kick.notified() => break,
+        };
         let text = match msg {
             Message::Text(t) => t.to_string(),
             Message::Binary(b) => String::from_utf8_lossy(&b).to_string(),
@@ -488,5 +520,31 @@ mod tests {
         assert_eq!(BridgeState::Registered.label(), "已注册");
         assert_eq!(BridgeState::Reconnecting.label(), "重连中");
         assert_eq!(BridgeState::Error.label(), "出错");
+    }
+
+    #[test]
+    fn refresh_apps_swaps_and_dedups() {
+        let handle = BridgeHandle {
+            inner: Arc::new(BridgeInner {
+                state: Mutex::new(BridgeState::Idle),
+                apps: Mutex::new(vec![("a".into(), "http://127.0.0.1:1".into())]),
+                pending: Mutex::new(HashMap::new()),
+                stopped: AtomicBool::new(false),
+                kick: tokio::sync::Notify::new(),
+                token: Mutex::new(String::new()),
+                url: Mutex::new(String::new()),
+                bridge_id: Mutex::new(String::new()),
+                pc_name: Mutex::new(String::new()),
+            }),
+        };
+        // 表没变 → false，不踢
+        assert!(!handle.refresh_apps(vec![("a".into(), "http://127.0.0.1:1".into())]));
+        // 表变了 → true，且 apps() 反映新表
+        assert!(handle.refresh_apps(vec![
+            ("a".into(), "http://127.0.0.1:1".into()),
+            ("b".into(), "http://127.0.0.1:2".into()),
+        ]));
+        assert_eq!(handle.apps().len(), 2);
+        assert_eq!(handle.apps()[1].0, "b");
     }
 }
