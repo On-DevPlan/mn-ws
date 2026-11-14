@@ -904,6 +904,8 @@ fn build_catalog(state: &Arc<State>, user_id: &str, is_gate: bool) -> Value {
                     "title": m.title,
                     "port": m.port,
                     "base": m.base,
+                    // 本机服务是否在监听（client 探测上报）—— 目录里标「未启动」用
+                    "alive": m.alive,
                     "bridgeId": pc.bridge_id,
                     // 这个 app 名现在路由到谁那儿 —— 路由表里的主人
                     "active": bridges.get(&m.app).map(|b| b.bridge_id == pc.bridge_id).unwrap_or(false),
@@ -1289,7 +1291,11 @@ fn handle_register(
             };
             let base = a.get("base").and_then(|v| v.as_str()).unwrap_or("");
             let title = a.get("title").and_then(|v| v.as_str());
-            clean.push(describe_app(app, Some(base), title));
+            // 存活状态由 client 探测上报；老客户端（0.7.4-）没有这个字段 → 按 true 算
+            let alive = a.get("alive").and_then(|v| v.as_bool()).unwrap_or(true);
+            let mut d = describe_app(app, Some(base), title);
+            d.alive = alive;
+            clean.push(d);
         }
     }
 

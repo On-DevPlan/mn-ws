@@ -886,7 +886,7 @@ pub async fn bridge_apps(cfg: &Map<String, Value>, resolved: &config::ResolvedAp
 }
 
 /// 探测基址上的端口是否在监听（TCP connect，超时 400ms）。
-async fn probe_alive(base: &str) -> bool {
+pub(crate) async fn probe_alive(base: &str) -> bool {
     let Some(port) = mn_ws_core::apps::port_of_base(base) else {
         return false;
     };

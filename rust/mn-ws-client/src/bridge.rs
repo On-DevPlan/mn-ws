@@ -106,6 +106,12 @@ impl BridgeHandle {
         *self.inner.state.lock().unwrap() = BridgeState::Stopped;
     }
 
+    /// 踢掉当前连接：主循环退避重连，connect_once 重读应用表**并重新探活**注册。
+    /// 应用表热更（refresh_apps）与存活状态变化（心跳巡逻）都走这里。
+    pub fn kick(&self) {
+        self.inner.kick.notify_waiters();
+    }
+
     /// 用新的应用表**热更**运行中的桥：换表 + 踢掉当前连接。
     ///
     /// 为什么必须踢：注册帧里的应用表是 connect_once 时的快照，server 的远端目录
@@ -123,7 +129,7 @@ impl BridgeHandle {
         }
         // 没有正在等的读循环（桥未连接/正在重连）时这是空操作 ——
         // 下一次 connect_once 反正会读新表。
-        self.inner.kick.notify_waiters();
+        self.kick();
         true
     }
 }
@@ -261,6 +267,19 @@ type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+/// 探一遍当前应用表的存活状态（名字 → alive），供心跳巡逻 diff 用。
+///
+/// 排序后比较 —— apps 的顺序稳定，但显式排序让 diff 不依赖锁内的存放顺序。
+async fn probe_apps_alive(handle: &BridgeHandle) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for (name, base) in handle.apps() {
+        let alive = crate::control::probe_alive(&base).await;
+        out.push((name, alive));
+    }
+    out.sort();
+    out
+}
+
 /// 建立一次连接并完成注册。
 async fn connect_once(handle: &BridgeHandle, url: &str) -> ConnectOutcome {
     if url.is_empty() {
@@ -277,22 +296,19 @@ async fn connect_once(handle: &BridgeHandle, url: &str) -> ConnectOutcome {
     };
     *handle.inner.state.lock().unwrap() = BridgeState::Connected;
 
-    // 注册帧：app 表 + 元信息 + 电脑名 + 令牌
-    let apps: Vec<Value> = handle
-        .inner
-        .apps
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(name, base)| {
-            let port = base
-                .rsplit(':')
-                .next()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(0);
-            json!({"app": name, "base": base, "port": port, "title": name})
-        })
-        .collect();
+    // 注册帧：app 表（带**存活状态**：本机端口探活，远端目录据此标「未启动」）
+    // + 元信息 + 电脑名 + 令牌。先克隆应用表再探测 —— 别拿着锁跨 await。
+    let pairs: Vec<(String, String)> = handle.inner.apps.lock().unwrap().clone();
+    let mut apps: Vec<Value> = Vec::with_capacity(pairs.len());
+    for (name, base) in &pairs {
+        let port = base
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(0);
+        let alive = crate::control::probe_alive(base).await;
+        apps.push(json!({"app": name, "base": base, "port": port, "title": name, "alive": alive}));
+    }
     let mut reg = json!({
         "type": protocol::frame_type::REGISTER,
         "role": "bridge",
@@ -357,13 +373,23 @@ async fn serve_connection(handle: &BridgeHandle, ws: WsStream) -> Option<u16> {
     // 发帧的通道：数据面与心跳都往这里写。
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
 
-    // 心跳任务
+    // 心跳任务 + **存活巡逻**：每个心跳周期把本机应用探活一遍，
+    // 状态变了就踢连接 —— 重连后的注册帧带着新鲜的 alive，远端目录跟着变。
+    // （目录里「运行中/未启动」因此始终是最近的真相，不需要手动刷新桥。）
+    let hb_handle = handle.clone();
     let heartbeat_tx = tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
         ticker.tick().await; // 第一次立即返回，先跳过
+        let mut last = probe_apps_alive(&hb_handle).await;
         loop {
             ticker.tick().await;
+            let now = probe_apps_alive(&hb_handle).await;
+            if now != last {
+                last = now;
+                hb_handle.kick();
+                break; // 连接即将被踢掉，心跳随之结束
+            }
             if heartbeat_tx.send(json!({"type": protocol::frame_type::PING})).is_err() {
                 break;
             }

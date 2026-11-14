@@ -69,7 +69,7 @@ pub fn port_of_base(base: &str) -> Option<u16> {
     })
 }
 
-/// 一个**已登记**的应用：名字 + 本地基址 + 标题。
+/// 一个**已登记**的应用：名字 + 本地基址 + 标题 + 存活状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppDescriptor {
     /// 路由标识
@@ -80,6 +80,9 @@ pub struct AppDescriptor {
     pub port: Option<u16>,
     /// 显示名。登记时没给就用名字兜底。
     pub title: String,
+    /// 本机服务是否在监听（client 注册/心跳时探测上报；老客户端不上报 → 按 true 算）。
+    /// 只做**展示**（目录里标「未启动」），路由不拦 —— 真打过去失败由桥回错误。
+    pub alive: bool,
 }
 
 /// app 的元信息（注册时上报给 server，汇总成 catalog）。
@@ -98,6 +101,7 @@ pub fn describe_app(app: &str, base: Option<&str>, title: Option<&str>) -> AppDe
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| app.to_string()),
         base,
+        alive: true,
     }
 }
 
@@ -108,6 +112,7 @@ pub fn describe_app_json(d: &AppDescriptor) -> Value {
         "base": d.base,
         "port": d.port,
         "title": d.title,
+        "alive": d.alive,
     })
 }
 

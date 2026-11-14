@@ -1,6 +1,6 @@
 {
   "name": "mn-ws-linux-x64",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "mn-ws 原生二进制（linux-x64）—— 由主包 mn-ws 的启动器按平台解析调用，不单独使用",
   "license": "MIT",
   "os": ["linux"],
