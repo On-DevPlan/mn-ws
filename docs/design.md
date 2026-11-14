@@ -1,6 +1,12 @@
 # mn-ws 设计文档 —— HTTP ⇄ WebSocket 双向桥
 
-> 状态：**待审核**（草案 v1，2026-11-12）
+> 状态：**历史设计**（草案 v1，2026-11-12，TS 时代写就）。
+> 目标/非目标/转发语义的**设计哲学仍然有效**；文中的实现引用
+> （`server/src/server.js`、pnpm workspace 双包等）是 Rust 化**之前**的形态。
+>
+> **现役架构与开发对齐看 [ARCHITECTURE.md](ARCHITECTURE.md)**；
+> Rust 化取舍看 [RUST-PORT.md](RUST-PORT.md)；TS 参考实现保存在 tag `ts-final`。
+>
 > 参考实现：mn-rt（RemoteType 中继）
 > 目标读者：本项目的维护者
 

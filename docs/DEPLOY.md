@@ -1,17 +1,16 @@
 # mn-ws-server 部署手册
 
 GitHub Actions 自动部署（`.github/workflows/deploy.yml`）：
-装依赖 → `pnpm -r build`（两个包）→ `docker build` → `docker save` → gzip →
-scp → 服务器 `docker load` → 重启容器 → `/health` 健康检查 →
+装依赖 → `pnpm -r build`（React 面板产物）→ `docker build`（**多阶段构建，Rust 二进制在镜像里编译**）→
+`docker save` → gzip → scp → 服务器 `docker load` → 重启容器 → `/health` 健康检查 →
 断言统一登录开关与部署意图一致 + 两端 client_id 正确。
 
 **镜像不走 GHCR**：服务器 pull ghcr.io 实测很慢（跨境 + GHCR 同步怪现象），
 一次部署的等待时间比传输本身还长。改成镜像直接传 —— 代价是每次部署都传一遍
 （gzip 后 ~40MB），换来的是**部署时间可控**。
 
-> ⚠️ 镜像里的 `dist/` 是**宿主机构建好的产物**（CI 先跑 `pnpm -r build`）。
-> server 半是 monorepo 的一个 workspace，单独在镜像里装依赖会拖进整个
-> workspace（client 的 react 等），所以构建与依赖安装分开。
+> ⚠️ 历史注（0.7.x Rust 化前）：镜像曾 COPY 宿主机构建的 TS dist —— 那套已删。
+> 现在 Dockerfile 只认 `rust/`，pnpm build 在部署流水线里仅用于验证前端可构建。
 
 ---
 
