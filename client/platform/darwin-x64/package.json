@@ -1,6 +1,6 @@
 {
   "name": "mn-ws-darwin-x64",
-  "version": "0.7.7",
+  "version": "0.7.8",
   "description": "mn-ws 原生二进制（darwin-x64）—— 由主包 mn-ws 的启动器按平台解析调用，不单独使用",
   "license": "MIT",
   "os": ["darwin"],
